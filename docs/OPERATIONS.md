@@ -22,17 +22,43 @@ If you see `data/.session_tmp/` left behind after a stop, the shutdown did not c
 
 ## Inspecting state
 
-Three read-only views:
+Read-only views:
 
 ```
 python scripts/inspect_db.py contacts
 python scripts/inspect_db.py messages <chat_id> [--limit 30]
-python scripts/inspect_db.py events  [--limit 50]
+python scripts/inspect_db.py events     [--limit 50]
+python scripts/inspect_db.py state      <chat_id>
+python scripts/inspect_db.py memory     <chat_id>
+python scripts/inspect_db.py migrations
 ```
+
+`state` and `memory` will print `(no state for chat <id>)` / `(no memory for chat <id>)` until Phase 4 begins writing to those tables.
 
 `events` includes heartbeats, reconnects, and any error events caught in the event handler. Useful for confirming the watchdog is alive and that nothing is silently failing.
 
 The live log lives at `logs/bot.log` (current day) and gzip-rotated daily for 14 days. The current file is open by the bot — use `Get-Content -Tail 50 -Wait logs\bot.log` (PowerShell) or `tail -f` (Git Bash) to follow.
+
+## Database
+
+Schema lives in `src/migrations.py` as a forward-only `MIGRATIONS` list. Each entry is `(version, name, sql)`. `init_db()` applies any pending migrations on every start; the `schema_migrations` table records which versions have already been applied.
+
+Inspect applied migrations:
+
+```
+python scripts/inspect_db.py migrations
+```
+
+**No down migrations.** Migrations are forward-only by design — there is no rollback path in code. If a migration is wrong and you need to roll back, restore `data/bot.db` from a backup (a plain file copy is sufficient when the bot is stopped). Treat each schema change as an irreversible commit; review the migration SQL carefully before merging.
+
+When adding a new migration:
+
+1. Append a new `Migration(version=N, name="...", sql="...")` to `MIGRATIONS` in `src/migrations.py`.
+2. Use `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` so re-runs are safe.
+3. Do not alter previously-published migrations — they have already executed on real databases.
+4. Run `pytest tests/test_migrations.py` to confirm fresh and upgrade paths both work.
+
+Foreign keys are enforced. Rows in `contact_state` / `contact_memory` must reference an existing `contacts.chat_id` (the event handler upserts the contact before any pipeline step writes state, so this is automatic in normal operation).
 
 ## Verifying the watchdog (simulated disconnect)
 

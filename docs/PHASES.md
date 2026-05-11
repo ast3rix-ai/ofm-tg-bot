@@ -15,7 +15,7 @@ Each phase is independently shippable. Do not implement features from future pha
 **Note:** Notifier optional as of phase-1.1; populate `.env` to enable.
 
 ## Phase 2 — State store deepening
-**Status:** not started
+**Status:** complete
 **Scope:** Additional tables for contact state (category, funnel stage, flags), distilled memory stub, conversation summary stub. Migration mechanism. Inspection CLI expanded.
 **Out of scope:** anything that writes to these tables — populated in Phase 4+.
 

@@ -116,6 +116,91 @@ def cmd_events(db_path: Path, args: argparse.Namespace) -> int:
     return 0
 
 
+def _wrap(text: str, width: int = 100) -> list[str]:
+    lines: list[str] = []
+    for paragraph in text.split("\n"):
+        if not paragraph:
+            lines.append("")
+            continue
+        current = ""
+        for word in paragraph.split(" "):
+            if not current:
+                current = word
+            elif len(current) + 1 + len(word) <= width:
+                current = current + " " + word
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+    return lines
+
+
+def cmd_state(db_path: Path, args: argparse.Namespace) -> int:
+    state = storage.get_contact_state(db_path, int(args.chat_id))
+    if state is None:
+        sys.stdout.write(f"(no state for chat {args.chat_id})\n")
+        return 0
+    for key in (
+        "chat_id",
+        "category",
+        "funnel_stage",
+        "last_classified_at",
+        "last_classifier_confidence",
+        "human_active",
+        "human_active_until",
+        "updated_at",
+    ):
+        sys.stdout.write(f"{key}: {state.get(key)}\n")
+    for key in ("flags", "classifier_metadata"):
+        value = state.get(key) or {}
+        sys.stdout.write(f"{key}:\n")
+        rendered = json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True)
+        for line in rendered.splitlines():
+            sys.stdout.write(f"  {line}\n")
+    return 0
+
+
+def cmd_memory(db_path: Path, args: argparse.Namespace) -> int:
+    memory = storage.get_contact_memory(db_path, int(args.chat_id))
+    if memory is None:
+        sys.stdout.write(f"(no memory for chat {args.chat_id})\n")
+        return 0
+    for key in (
+        "chat_id",
+        "summary_message_count",
+        "last_summarized_at",
+        "updated_at",
+    ):
+        sys.stdout.write(f"{key}: {memory.get(key)}\n")
+    facts = memory.get("facts") or {}
+    sys.stdout.write("facts:\n")
+    rendered = json.dumps(facts, indent=2, ensure_ascii=False, sort_keys=True)
+    for line in rendered.splitlines():
+        sys.stdout.write(f"  {line}\n")
+    sys.stdout.write("summary:\n")
+    summary = memory.get("summary") or ""
+    if summary:
+        for line in _wrap(summary, 100):
+            sys.stdout.write(f"  {line}\n")
+    else:
+        sys.stdout.write("  (empty)\n")
+    return 0
+
+
+def cmd_migrations(db_path: Path, _args: argparse.Namespace) -> int:
+    rows = storage.get_applied_migrations(db_path)
+    if not rows:
+        sys.stdout.write("(no migrations applied)\n")
+        return 0
+    headers = ("version", "name", "applied_at")
+    table_rows = [
+        (str(r["version"]), str(r["name"]), str(r["applied_at"])) for r in rows
+    ]
+    _print_table(headers, table_rows)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Read-only inspection CLI for the local SQLite DB."
@@ -130,6 +215,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_evt = sub.add_parser("events", help="Show recent operational events.")
     p_evt.add_argument("--limit", type=int, default=50)
+
+    p_state = sub.add_parser("state", help="Show contact_state for a chat_id.")
+    p_state.add_argument("chat_id", type=int)
+
+    p_mem = sub.add_parser("memory", help="Show contact_memory for a chat_id.")
+    p_mem.add_argument("chat_id", type=int)
+
+    sub.add_parser("migrations", help="List applied schema migrations.")
 
     return parser
 
@@ -146,6 +239,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_messages(db_path, args)
     if args.command == "events":
         return cmd_events(db_path, args)
+    if args.command == "state":
+        return cmd_state(db_path, args)
+    if args.command == "memory":
+        return cmd_memory(db_path, args)
+    if args.command == "migrations":
+        return cmd_migrations(db_path, args)
     sys.stderr.write(f"Unknown command: {args.command}\n")
     return 2
 

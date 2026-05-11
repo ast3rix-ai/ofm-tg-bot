@@ -7,8 +7,16 @@ The bot is a single-process async Python application with eight logical componen
 ### 1. Telegram client layer (`src/telegram_client.py`)
 Thin wrapper around Telethon. Handles connection, session encryption at rest, reconnection. Knows nothing about classification, persona, or response generation. Exposes: connect, disconnect, send_message, mark_read, send_typing, event subscription.
 
-### 2. Storage (`src/storage.py`)
-SQLite. Tables: `contacts`, `messages`, `events`, plus phase-additive tables (`contact_state`, `contact_memory`, etc.) added as phases land. All access via module functions. No ORM.
+### 2. Storage (`src/storage.py`, `src/migrations.py`)
+SQLite. Schema is applied via a forward-only versioned migration list in `src/migrations.py`; `init_db()` is idempotent and safe to run against an upgrading database. The `schema_migrations` table records which versions have been applied. Foreign keys are enforced (`PRAGMA foreign_keys = ON` on every connection).
+
+Tables in the current schema:
+
+- **`contacts`, `messages`, `events`** — Phase 1 surface area. Incoming DMs persist into `messages` (`UNIQUE(chat_id, tg_message_id, direction)` for idempotent replays); contacts upsert on every inbound; operational events (heartbeats, reconnects, handler errors) accumulate in `events`.
+- **`contact_state`** — Phase 2 surface area, populated from Phase 4+. One row per chat. Holds the current classifier output (`category`, `funnel_stage`, `last_classifier_confidence`, raw `classifier_metadata`), behavioral flags (`flags` JSON, `human_active`, `human_active_until`), and an `updated_at` timestamp. Drives routing decisions and operator-takeover suppression.
+- **`contact_memory`** — Phase 2 surface area, populated from Phase 4+. One row per chat. Holds the distilled per-contact `facts` (JSON), the rolling `summary`, the `summary_message_count` watermark, and `last_summarized_at`. Survives context-window truncation in the response generator.
+
+All access goes through module-level functions; there is no ORM. JSON columns are decoded into dicts on read and serialized on write by the `upsert_*` helpers, which accept only whitelisted field names (typed via `TypedDict` + PEP 692 `Unpack`).
 
 ### 3. Event handler (`src/event_handler.py`)
 Subscribes to incoming DM events from the Telegram client. For each message: persist, then dispatch to the pipeline. Holds per-chat asyncio locks. Catches and logs all exceptions; never lets the handler die silently.
