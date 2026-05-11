@@ -34,20 +34,23 @@ def _text_preview(text: str | None) -> str:
 class EventHandler:
     """Subscribes to incoming private DMs, persists them, dispatches to pipeline.
 
-    In Phase 1 the pipeline is observation-only — messages are stored and
-    logged. Per-chat asyncio locks are constructed but not yet contended.
+    Phase 3 makes the handler account-aware: every row written into
+    contacts / messages / events carries the active `account_id`.
     """
 
     def __init__(
         self,
+        *,
         client: BotClient,
         db_path: Path,
         notifier: Notifier,
+        account_id: int,
     ) -> None:
         self._client = client
         self._db_path = db_path
         self._notifier = notifier
-        self._log = logger.bind(module=__name__)
+        self._account_id = account_id
+        self._log = logger.bind(module=__name__, account_id=account_id)
         self._chat_locks: dict[int, asyncio.Lock] = {}
 
     def get_lock(self, chat_id: int) -> asyncio.Lock:
@@ -87,6 +90,7 @@ class EventHandler:
 
             storage.upsert_contact(
                 self._db_path,
+                account_id=self._account_id,
                 chat_id=chat_id,
                 tg_user_id=sender_id,
                 username=username,
@@ -100,6 +104,7 @@ class EventHandler:
 
             inserted = storage.insert_message(
                 self._db_path,
+                account_id=self._account_id,
                 chat_id=chat_id,
                 tg_message_id=int(message.id),
                 direction="in",
@@ -130,6 +135,7 @@ class EventHandler:
                     self._db_path,
                     "event_handler_error",
                     {"error": str(exc), "traceback": tb},
+                    account_id=self._account_id,
                 )
             except Exception as log_exc:  # noqa: BLE001
                 self._log.warning(

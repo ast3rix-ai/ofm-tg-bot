@@ -8,10 +8,13 @@ import pytest
 from src.config import ConfigError, load_config
 
 _REQUIRED_ENV = {
+    "SESSION_ENCRYPTION_KEY": "x" * 44,
+}
+
+_LEGACY_ENV = {
     "TG_API_ID": "12345",
     "TG_API_HASH": "deadbeef",
     "TG_PHONE": "+10000000000",
-    "SESSION_ENCRYPTION_KEY": "x" * 44,
 }
 
 _NOTIFIER_ENV = {
@@ -31,6 +34,8 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[pytest.MonkeyPatch]:
         "NOTIFIER_CHAT_ID",
         "HEARTBEAT_INTERVAL_SECONDS",
         "LOG_LEVEL",
+        "UI_PORT",
+        "UI_AUTO_ACTIVATE",
     ):
         monkeypatch.delenv(key, raising=False)
     yield monkeypatch
@@ -40,18 +45,33 @@ def _missing_env_file(tmp_path: Path) -> Path:
     return tmp_path / "absent.env"
 
 
-def test_load_config_succeeds_without_notifier(
+def test_load_config_succeeds_with_only_required(
     clean_env: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     for k, v in _REQUIRED_ENV.items():
         clean_env.setenv(k, v)
     cfg = load_config(env_file=_missing_env_file(tmp_path))
+    assert cfg.tg_api_id is None
+    assert cfg.tg_api_hash is None
+    assert cfg.tg_phone is None
     assert cfg.notifier_bot_token is None
     assert cfg.notifier_chat_id is None
+    assert cfg.ui_port == 8765
+    assert cfg.ui_auto_activate is True
+
+
+def test_load_config_legacy_creds(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for k, v in {**_REQUIRED_ENV, **_LEGACY_ENV}.items():
+        clean_env.setenv(k, v)
+    cfg = load_config(env_file=_missing_env_file(tmp_path))
     assert cfg.tg_api_id == 12345
+    assert cfg.tg_api_hash == "deadbeef"
+    assert cfg.tg_phone == "+10000000000"
 
 
-def test_load_config_succeeds_with_notifier(
+def test_load_config_with_notifier(
     clean_env: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     for k, v in {**_REQUIRED_ENV, **_NOTIFIER_ENV}.items():
@@ -61,19 +81,15 @@ def test_load_config_succeeds_with_notifier(
     assert cfg.notifier_chat_id == 9999
 
 
-def test_load_config_fails_when_required_missing(
+def test_load_config_fails_without_encryption_key(
     clean_env: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    for k, v in _REQUIRED_ENV.items():
-        if k == "TG_API_ID":
-            continue
-        clean_env.setenv(k, v)
     with pytest.raises(ConfigError) as exc:
         load_config(env_file=_missing_env_file(tmp_path))
-    assert "TG_API_ID" in str(exc.value)
+    assert "SESSION_ENCRYPTION_KEY" in str(exc.value)
 
 
-def test_load_config_invalid_notifier_chat_id_is_reported(
+def test_load_config_invalid_chat_id_reported(
     clean_env: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     for k, v in _REQUIRED_ENV.items():
@@ -82,3 +98,15 @@ def test_load_config_invalid_notifier_chat_id_is_reported(
     with pytest.raises(ConfigError) as exc:
         load_config(env_file=_missing_env_file(tmp_path))
     assert "NOTIFIER_CHAT_ID" in str(exc.value)
+
+
+def test_load_config_ui_port_override(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for k, v in _REQUIRED_ENV.items():
+        clean_env.setenv(k, v)
+    clean_env.setenv("UI_PORT", "9000")
+    clean_env.setenv("UI_AUTO_ACTIVATE", "false")
+    cfg = load_config(env_file=_missing_env_file(tmp_path))
+    assert cfg.ui_port == 9000
+    assert cfg.ui_auto_activate is False

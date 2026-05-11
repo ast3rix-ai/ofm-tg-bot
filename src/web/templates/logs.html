@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Logs — ofm-tg-bot{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold mb-4">Live logs</h1>
+
+<div x-data="logsViewer()" x-init="start()"
+     class="bg-zinc-950 text-zinc-100 rounded shadow border border-zinc-200">
+  <div class="px-4 py-2 border-b border-zinc-800 flex items-center gap-3 text-sm">
+    <input type="text" placeholder="filter substring (case-insensitive)"
+           class="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 flex-1"
+           x-model="filter">
+    <label class="flex items-center gap-1">
+      <input type="checkbox" x-model="autoscroll"> auto-scroll
+    </label>
+    <span class="text-zinc-500 font-mono" x-text="status"></span>
+    <button @click="clear()"
+            class="px-2 py-1 border border-zinc-700 rounded hover:bg-zinc-800">Clear</button>
+  </div>
+  <pre class="log p-3 text-xs h-[75vh] overflow-auto" x-ref="pane" @scroll="onScroll($event)"></pre>
+</div>
+
+<script>
+  function logsViewer() {
+    return {
+      filter: '',
+      autoscroll: true,
+      status: 'connecting…',
+      es: null,
+      start() {
+        this.es = new EventSource('/logs/stream');
+        this.es.addEventListener('log', (ev) => this.append(ev.data));
+        this.es.addEventListener('ping', () => { this.status = 'live'; });
+        this.es.onopen = () => { this.status = 'live'; };
+        this.es.onerror = () => { this.status = 'disconnected'; };
+      },
+      append(line) {
+        if (this.filter && !line.toLowerCase().includes(this.filter.toLowerCase())) return;
+        const pane = this.$refs.pane;
+        pane.appendChild(document.createTextNode(line + '\n'));
+        if (this.autoscroll) pane.scrollTop = pane.scrollHeight;
+      },
+      onScroll(ev) {
+        const pane = ev.target;
+        const atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 5;
+        if (!atBottom) this.autoscroll = false;
+      },
+      clear() {
+        this.$refs.pane.textContent = '';
+      },
+    };
+  }
+</script>
+{% endblock %}

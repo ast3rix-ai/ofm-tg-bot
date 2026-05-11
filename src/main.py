@@ -3,21 +3,36 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
-from types import FrameType
 
+import uvicorn
 from loguru import logger
 
+from src import accounts as accounts_mod
 from src import storage
-from src.config import ConfigError, load_config
-from src.event_handler import EventHandler
+from src.bot_manager import BotManager
+from src.config import Config, ConfigError, load_config
 from src.logging_config import setup_logging
 from src.notifier import Notifier
-from src.telegram_client import BotClient
-from src.watchdog import Watchdog
+from src.web.app import create_app
+
+
+def _build_migration_context(config: Config) -> dict[str, object]:
+    """Assemble the context dict consumed by `init_db` migrations."""
+    ctx: dict[str, object] = {
+        "encryption_key": config.session_encryption_key,
+    }
+    if config.tg_api_id and config.tg_api_hash and config.tg_phone:
+        ctx["default_label"] = "Default"
+        ctx["default_api_id"] = config.tg_api_id
+        ctx["default_api_hash"] = config.tg_api_hash
+        ctx["default_phone"] = config.tg_phone
+    if config.legacy_encrypted_session_path.exists():
+        ctx["legacy_session_path"] = str(config.legacy_encrypted_session_path)
+    return ctx
 
 
 async def main() -> None:
-    """Boot the userbot: connect, register handlers, run until disconnected."""
+    """Boot the bot host: run migrations, start UI, optionally auto-activate."""
     try:
         config = load_config()
     except ConfigError as exc:
@@ -29,44 +44,41 @@ async def main() -> None:
 
     config.data_dir.mkdir(parents=True, exist_ok=True)
     config.logs_dir.mkdir(parents=True, exist_ok=True)
-    config.session_tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    storage.init_db(config.db_path)
+    migration_context = _build_migration_context(config)
+    storage.init_db(config.db_path, migration_context)
     log.info("DB initialized", db_path=str(config.db_path))
 
     notifier = Notifier(config.notifier_bot_token, config.notifier_chat_id)
-    client = BotClient(config)
-    handler = EventHandler(client, config.db_path, notifier)
-    watchdog = Watchdog(
-        client, config.db_path, notifier, config.heartbeat_interval_seconds
+    bot_manager = BotManager(
+        db_path=config.db_path,
+        encryption_key=config.session_encryption_key,
+        notifier=notifier,
+        heartbeat_interval_seconds=config.heartbeat_interval_seconds,
     )
 
-    await notifier.alert("Bot starting", severity="info")
+    app = create_app(config=config, bot_manager=bot_manager, notifier=notifier)
 
-    try:
-        await client.start()
-    except Exception as exc:  # noqa: BLE001
-        log.error("Failed to start Telegram client", error=str(exc))
-        await notifier.alert(
-            f"Bot start failed: {exc}", severity="error", key="bot_start_failure"
-        )
-        raise
-
-    await handler.setup()
-
-    watchdog_task = asyncio.create_task(watchdog.run(), name="watchdog")
-    watchdog.attach_task(watchdog_task)
+    uv_config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=config.ui_port,
+        log_level="warning",
+        access_log=False,
+    )
+    server = uvicorn.Server(uv_config)
+    server_task = asyncio.create_task(server.serve(), name="uvicorn")
 
     stop_event = asyncio.Event()
 
-    def _request_stop(signum: int, frame: FrameType | None) -> None:
-        log.info("Shutdown signal received", signal=signum)
+    def _request_stop(*_: object) -> None:
+        log.info("Shutdown signal received")
         stop_event.set()
 
     if sys.platform != "win32":
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop_event.set)
+            loop.add_signal_handler(sig, _request_stop)
     else:
         signal.signal(signal.SIGINT, _request_stop)
         try:
@@ -74,39 +86,66 @@ async def main() -> None:
         except (AttributeError, ValueError):
             pass
 
-    await notifier.alert("Bot started", severity="info")
-    log.info("Bot started")
-
-    disconnect_task = asyncio.create_task(
-        client.client.run_until_disconnected(),
-        name="run_until_disconnected",
+    log.info(
+        "UI ready", host="127.0.0.1", port=config.ui_port,
+        url=f"http://127.0.0.1:{config.ui_port}",
     )
-    stop_task = asyncio.create_task(stop_event.wait(), name="stop_wait")
+    await notifier.alert(
+        f"Bot host started — UI at http://127.0.0.1:{config.ui_port}",
+        severity="info",
+    )
+
+    if config.ui_auto_activate:
+        active = accounts_mod.get_active_account(
+            config.db_path, config.session_encryption_key
+        )
+        if active is not None and active.has_session:
+            log.info(
+                "Auto-activating account",
+                account_id=active.id, label=active.label,
+            )
+            asyncio.create_task(
+                _auto_activate(bot_manager, active.id),
+                name="auto-activate",
+            )
+        elif active is not None:
+            log.info(
+                "Active account has no session yet — open the UI to authenticate",
+                account_id=active.id,
+            )
+        else:
+            log.info("No active account — open the UI to add or activate one")
+
+    stop_task = asyncio.create_task(stop_event.wait(), name="stop-wait")
 
     try:
-        done, _pending = await asyncio.wait(
-            {disconnect_task, stop_task},
+        await asyncio.wait(
+            {stop_task, server_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
-        if stop_task in done:
-            log.info("Stop requested — shutting down.")
-        else:
-            log.info("Telegram client disconnected — shutting down.")
     finally:
         stop_task.cancel()
-        await watchdog.stop()
-        if not disconnect_task.done():
-            disconnect_task.cancel()
-            try:
-                await disconnect_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+        log.info("Shutting down")
         try:
-            await client.stop()
+            await bot_manager.deactivate()
         except Exception as exc:  # noqa: BLE001
-            log.warning("Client stop raised", error=str(exc))
-        await notifier.alert("Bot stopped", severity="info")
-        log.info("Bot stopped")
+            log.warning("Bot deactivate raised", error=str(exc))
+        server.should_exit = True
+        try:
+            await asyncio.wait_for(server_task, timeout=10)
+        except (TimeoutError, Exception):  # noqa: BLE001
+            server_task.cancel()
+        await notifier.alert("Bot host stopped", severity="info")
+        log.info("Bot host stopped")
+
+
+async def _auto_activate(bot_manager: BotManager, account_id: int) -> None:
+    try:
+        await bot_manager.activate(account_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.bind(module="src.main").warning(
+            "Auto-activate failed", account_id=account_id, error=str(exc)
+        )
 
 
 if __name__ == "__main__":

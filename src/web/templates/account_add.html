@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Add account — ofm-tg-bot{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold mb-4">Add account</h1>
+
+<form method="post" action="/accounts" class="bg-white rounded shadow border border-zinc-200 p-6 max-w-xl">
+  <div class="mb-4">
+    <label class="block text-sm font-medium mb-1">Label</label>
+    <input name="label" required maxlength="64"
+           class="w-full border border-zinc-300 rounded px-3 py-2"
+           placeholder="e.g. Sophia">
+    <p class="text-xs text-zinc-500 mt-1">Operator-visible name only.</p>
+  </div>
+
+  <div class="mb-4">
+    <label class="block text-sm font-medium mb-1">API ID</label>
+    <input name="api_id" required type="number" inputmode="numeric"
+           class="w-full border border-zinc-300 rounded px-3 py-2">
+  </div>
+
+  <div class="mb-4">
+    <label class="block text-sm font-medium mb-1">API hash</label>
+    <input name="api_hash" required
+           class="w-full border border-zinc-300 rounded px-3 py-2 font-mono">
+  </div>
+
+  <div class="mb-4">
+    <label class="block text-sm font-medium mb-1">Phone (E.164)</label>
+    <input name="phone" required
+           class="w-full border border-zinc-300 rounded px-3 py-2 font-mono"
+           placeholder="+15551234567">
+  </div>
+
+  <p class="text-xs text-zinc-500 mb-4">
+    Credentials come from <a href="https://my.telegram.org" target="_blank" class="underline">my.telegram.org</a>.
+    They are stored encrypted in the local database.
+  </p>
+
+  <div class="flex gap-2">
+    <button class="bg-emerald-700 text-white px-4 py-2 rounded hover:bg-emerald-800">
+      Save
+    </button>
+    <a href="/accounts" class="px-4 py-2 rounded border border-zinc-300 hover:bg-zinc-100">Cancel</a>
+  </div>
+</form>
+{% endblock %}

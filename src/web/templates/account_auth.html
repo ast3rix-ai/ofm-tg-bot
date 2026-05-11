@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Authenticate {{ account.label }} — ofm-tg-bot{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold mb-4">Authenticate <span class="font-mono">{{ account.label }}</span></h1>
+
+<div class="bg-white rounded shadow border border-zinc-200 p-6 max-w-xl"
+     x-data="authFlow({{ account.id }})"
+     x-init="poll()">
+
+  <div class="mb-4 text-sm">
+    State:
+    <span class="font-mono" x-text="state"></span>
+    <template x-if="lastError">
+      <span class="text-red-700 ml-2" x-text="lastError"></span>
+    </template>
+  </div>
+
+  <template x-if="state === 'idle' || state === 'error'">
+    <form method="post" :action="`/accounts/${accountId}/auth/start`">
+      <p class="mb-4 text-sm">
+        Click <strong>Start Auth</strong> to begin. Telegram will SMS a code to the phone on this account.
+        Enter it here when prompted.
+      </p>
+      <button class="bg-emerald-700 text-white px-4 py-2 rounded hover:bg-emerald-800">Start Auth</button>
+    </form>
+  </template>
+
+  <template x-if="state === 'starting' || state === 'stopping'">
+    <p class="text-sm text-zinc-600">Working… (status refreshes every 2s)</p>
+  </template>
+
+  <template x-if="state === 'awaiting_code'">
+    <form method="post" :action="`/accounts/${accountId}/auth/code`">
+      <label class="block text-sm font-medium mb-1">Phone code</label>
+      <input name="code" required autocomplete="one-time-code" inputmode="numeric"
+             class="w-full border border-zinc-300 rounded px-3 py-2 font-mono mb-3">
+      <button class="bg-emerald-700 text-white px-4 py-2 rounded hover:bg-emerald-800">Submit code</button>
+    </form>
+  </template>
+
+  <template x-if="state === 'awaiting_password'">
+    <form method="post" :action="`/accounts/${accountId}/auth/password`">
+      <label class="block text-sm font-medium mb-1">2FA password</label>
+      <input name="password" required type="password" autocomplete="current-password"
+             class="w-full border border-zinc-300 rounded px-3 py-2 mb-3">
+      <button class="bg-emerald-700 text-white px-4 py-2 rounded hover:bg-emerald-800">Submit password</button>
+    </form>
+  </template>
+
+  <template x-if="state === 'running'">
+    <div>
+      <p class="text-emerald-700 mb-2">Authenticated.</p>
+      <a href="/accounts" class="text-emerald-700 hover:underline">Back to accounts →</a>
+    </div>
+  </template>
+</div>
+
+<script>
+  function authFlow(accountId) {
+    return {
+      accountId,
+      state: '{{ status.state }}',
+      lastError: '{{ status.last_error or "" }}',
+      async poll() {
+        await this.refresh();
+        setInterval(() => this.refresh(), 2000);
+      },
+      async refresh() {
+        try {
+          const r = await fetch('/system/status');
+          const j = await r.json();
+          if (j.bot.active_account_id === this.accountId
+              || j.bot.active_account_id === null) {
+            this.state = j.bot.state;
+            this.lastError = j.bot.last_error || '';
+          }
+        } catch (e) {}
+      },
+    };
+  }
+</script>
+{% endblock %}

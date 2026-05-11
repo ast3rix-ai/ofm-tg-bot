@@ -15,68 +15,50 @@ class ConfigError(RuntimeError):
 class Config:
     """Runtime configuration loaded from environment variables.
 
-    Attributes:
-        tg_api_id: Telegram API ID from my.telegram.org.
-        tg_api_hash: Telegram API hash from my.telegram.org.
-        tg_phone: Phone number of the operated account in E.164 format.
-        session_encryption_key: Fernet key for session-at-rest encryption.
-        notifier_bot_token: Token of the separate regular bot used for alerts.
-        notifier_chat_id: Chat ID that receives operator alerts.
-        heartbeat_interval_seconds: Watchdog heartbeat cadence in seconds.
-        log_level: Console log level (DEBUG / INFO / WARNING / ERROR).
-        project_root: Repository root directory.
-        data_dir: Directory for persistent data (DB, encrypted session).
-        logs_dir: Directory for log files.
-        session_tmp_dir: Directory for the decrypted session at runtime.
-        db_path: Absolute path of the SQLite database file.
-        encrypted_session_path: Absolute path of the encrypted session blob.
-        decrypted_session_path: Absolute path of the decrypted session file.
+    `tg_api_id`, `tg_api_hash`, and `tg_phone` are legacy fields used only
+    to backfill the default account on first run after upgrading from
+    Phase 2; from Phase 3 onward, credentials live encrypted inside the
+    `accounts` table and are managed via the UI.
     """
 
-    tg_api_id: int
-    tg_api_hash: str
-    tg_phone: str
+    tg_api_id: int | None
+    tg_api_hash: str | None
+    tg_phone: str | None
     session_encryption_key: str
     notifier_bot_token: str | None
     notifier_chat_id: int | None
     heartbeat_interval_seconds: int
     log_level: str
+    ui_port: int
+    ui_auto_activate: bool
     project_root: Path
     data_dir: Path
     logs_dir: Path
-    session_tmp_dir: Path
     db_path: Path
-    encrypted_session_path: Path
-    decrypted_session_path: Path
-
-
-_REQUIRED_STRING_KEYS = (
-    "TG_API_HASH",
-    "TG_PHONE",
-    "SESSION_ENCRYPTION_KEY",
-)
-
-_REQUIRED_INT_KEYS = (
-    "TG_API_ID",
-)
+    legacy_encrypted_session_path: Path
 
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _parse_bool(raw: str, default: bool) -> bool:
+    value = raw.strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def load_config(env_file: Path | None = None) -> Config:
     """Load and validate configuration from a `.env` file and the environment.
 
-    Args:
-        env_file: Optional explicit path to a `.env` file. Defaults to
-            `<project_root>/.env`.
-
-    Returns:
-        A fully populated, frozen `Config` instance.
-
-    Raises:
-        ConfigError: If any required key is missing or unparseable.
+    Only `SESSION_ENCRYPTION_KEY` is strictly required from Phase 3 onward.
+    All other fields are optional and either default or are populated via
+    the UI.
     """
     root = _project_root()
     path = env_file if env_file is not None else root / ".env"
@@ -85,27 +67,22 @@ def load_config(env_file: Path | None = None) -> Config:
     missing: list[str] = []
     invalid: list[str] = []
 
-    string_values: dict[str, str] = {}
-    for key in _REQUIRED_STRING_KEYS:
-        raw = os.environ.get(key, "").strip()
-        if not raw:
-            missing.append(key)
-        else:
-            string_values[key] = raw
+    session_key = os.environ.get("SESSION_ENCRYPTION_KEY", "").strip()
+    if not session_key:
+        missing.append("SESSION_ENCRYPTION_KEY")
 
-    int_values: dict[str, int] = {}
-    for key in _REQUIRED_INT_KEYS:
-        raw = os.environ.get(key, "").strip()
-        if not raw:
-            missing.append(key)
-            continue
+    api_id_raw = os.environ.get("TG_API_ID", "").strip()
+    api_id: int | None = None
+    if api_id_raw:
         try:
-            int_values[key] = int(raw)
+            api_id = int(api_id_raw)
         except ValueError:
-            invalid.append(f"{key} (not an integer: {raw!r})")
+            invalid.append(f"TG_API_ID (not an integer: {api_id_raw!r})")
 
-    notifier_token_raw = os.environ.get("NOTIFIER_BOT_TOKEN", "").strip()
-    notifier_token: str | None = notifier_token_raw or None
+    api_hash = os.environ.get("TG_API_HASH", "").strip() or None
+    phone = os.environ.get("TG_PHONE", "").strip() or None
+
+    notifier_token = os.environ.get("NOTIFIER_BOT_TOKEN", "").strip() or None
 
     notifier_chat_raw = os.environ.get("NOTIFIER_CHAT_ID", "").strip()
     notifier_chat: int | None
@@ -127,6 +104,17 @@ def load_config(env_file: Path | None = None) -> Config:
 
     log_level = (os.environ.get("LOG_LEVEL", "INFO").strip() or "INFO").upper()
 
+    ui_port_raw = os.environ.get("UI_PORT", "8765").strip() or "8765"
+    try:
+        ui_port = int(ui_port_raw)
+    except ValueError:
+        invalid.append(f"UI_PORT (not an integer: {ui_port_raw!r})")
+        ui_port = 8765
+
+    ui_auto_activate = _parse_bool(
+        os.environ.get("UI_AUTO_ACTIVATE", ""), default=True
+    )
+
     if missing or invalid:
         parts: list[str] = []
         if missing:
@@ -140,22 +128,21 @@ def load_config(env_file: Path | None = None) -> Config:
 
     data_dir = root / "data"
     logs_dir = root / "logs"
-    session_tmp_dir = data_dir / ".session_tmp"
 
     return Config(
-        tg_api_id=int_values["TG_API_ID"],
-        tg_api_hash=string_values["TG_API_HASH"],
-        tg_phone=string_values["TG_PHONE"],
-        session_encryption_key=string_values["SESSION_ENCRYPTION_KEY"],
+        tg_api_id=api_id,
+        tg_api_hash=api_hash,
+        tg_phone=phone,
+        session_encryption_key=session_key,
         notifier_bot_token=notifier_token,
         notifier_chat_id=notifier_chat,
         heartbeat_interval_seconds=heartbeat,
         log_level=log_level,
+        ui_port=ui_port,
+        ui_auto_activate=ui_auto_activate,
         project_root=root,
         data_dir=data_dir,
         logs_dir=logs_dir,
-        session_tmp_dir=session_tmp_dir,
         db_path=data_dir / "bot.db",
-        encrypted_session_path=data_dir / "session.enc",
-        decrypted_session_path=session_tmp_dir / "userbot.session",
+        legacy_encrypted_session_path=data_dir / "session.enc",
     )

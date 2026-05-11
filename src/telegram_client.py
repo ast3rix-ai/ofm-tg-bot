@@ -1,37 +1,48 @@
 from __future__ import annotations
 
-import shutil
+import asyncio
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from loguru import logger
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 
-from src.config import Config
-from src.crypto import decrypt_file, encrypt_file
+CodeProvider = Callable[[], Awaitable[str]]
+PasswordProvider = Callable[[], Awaitable[str]]
+SessionUpdateCallback = Callable[[str], None]
 
 
 class BotClient:
-    """Telethon wrapper that encrypts the session file at rest.
+    """Telethon wrapper using `StringSession` for in-DB session storage.
 
-    Lifecycle:
-        1. `start()` decrypts `session.enc` (if it exists) to a temp file and
-           connects. On first run, Telethon prompts on stdin for the phone
-           code (and 2FA password if set).
-        2. `stop()` disconnects, re-encrypts the temp session, and removes
-           the temp directory.
-
-    Thread/task-safety: the underlying Telethon client is single-loop; do
-    not share across processes.
+    The session lives only in memory and in the encrypted DB blob —
+    never on disk as a `.session` file. Each call into the client that
+    might mutate the session triggers a save via `on_session_update`.
     """
 
-    def __init__(self, config: Config) -> None:
-        self._config = config
-        self._log = logger.bind(module=__name__)
+    def __init__(
+        self,
+        *,
+        api_id: int,
+        api_hash: str,
+        phone: str,
+        session_string: str | None,
+        on_session_update: SessionUpdateCallback,
+        label: str,
+    ) -> None:
+        self._api_id = api_id
+        self._api_hash = api_hash
+        self._phone = phone
+        self._on_session_update = on_session_update
+        self._label = label
+        self._session: StringSession = StringSession(session_string or "")
         self._client: TelegramClient | None = None
-        self._session_loaded = False
+        self._log = logger.bind(module=__name__, account=label)
+        self._last_saved_session_string = session_string or ""
 
     @property
     def client(self) -> TelegramClient:
-        """Underlying Telethon client. Available after `start()`."""
         if self._client is None:
             raise RuntimeError("BotClient.start() has not been called.")
         return self._client
@@ -41,59 +52,68 @@ class BotClient:
             return False
         return bool(self._client.is_connected())
 
-    def _prepare_session(self) -> None:
-        cfg = self._config
-        cfg.session_tmp_dir.mkdir(parents=True, exist_ok=True)
-        if cfg.encrypted_session_path.exists():
-            self._log.info(
-                "Decrypting session at rest",
-                src=str(cfg.encrypted_session_path),
-            )
-            decrypt_file(
-                cfg.encrypted_session_path,
-                cfg.decrypted_session_path,
-                cfg.session_encryption_key,
-            )
-            self._session_loaded = True
-        else:
-            self._log.info(
-                "No encrypted session found — first-run auth will be required."
-            )
-
-    def _persist_session(self) -> None:
-        cfg = self._config
-        if not cfg.decrypted_session_path.exists():
-            self._log.warning("No decrypted session to persist.")
+    def _maybe_save_session(self) -> None:
+        if self._client is None:
             return
-        encrypt_file(
-            cfg.decrypted_session_path,
-            cfg.encrypted_session_path,
-            cfg.session_encryption_key,
-        )
-        self._log.info(
-            "Session re-encrypted at rest",
-            dst=str(cfg.encrypted_session_path),
-        )
-
-    def _cleanup_tmp(self) -> None:
-        cfg = self._config
         try:
-            if cfg.session_tmp_dir.exists():
-                shutil.rmtree(cfg.session_tmp_dir, ignore_errors=True)
-        except OSError as exc:
-            self._log.warning("Failed to remove session tmp dir", error=str(exc))
+            current = self._client.session.save()
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning("session.save() failed", error=str(exc))
+            return
+        if current and current != self._last_saved_session_string:
+            self._last_saved_session_string = current
+            try:
+                self._on_session_update(current)
+            except Exception as exc:  # noqa: BLE001
+                self._log.warning("Session persistence failed", error=str(exc))
 
-    async def start(self) -> None:
-        """Connect to Telegram, decrypting the session and prompting on first run."""
-        self._prepare_session()
-        cfg = self._config
-        self._client = TelegramClient(
-            str(cfg.decrypted_session_path.with_suffix("")),
-            cfg.tg_api_id,
-            cfg.tg_api_hash,
-        )
-        self._log.info("Connecting to Telegram", phone=cfg.tg_phone)
-        await self._client.start(phone=lambda: cfg.tg_phone)
+    async def start(
+        self,
+        *,
+        code_provider: CodeProvider | None = None,
+        password_provider: PasswordProvider | None = None,
+    ) -> None:
+        """Connect and authenticate.
+
+        If the session already contains credentials, this is a no-op
+        beyond opening the network connection. Otherwise, Telethon will
+        invoke the supplied providers to fetch the SMS code (and 2FA
+        password if set). When the providers are absent, the client must
+        already be authenticated.
+
+        Raises:
+            RuntimeError: If first-run auth is required and a provider
+                wasn't supplied.
+        """
+        self._client = TelegramClient(self._session, self._api_id, self._api_hash)
+        self._log.info("Connecting to Telegram")
+
+        await self._client.connect()
+
+        if not await self._client.is_user_authorized():
+            self._log.info("First-run auth required")
+            if code_provider is None:
+                raise RuntimeError(
+                    "Account is not authenticated and no code_provider was"
+                    " supplied to BotClient.start()."
+                )
+            await self._client.send_code_request(self._phone)
+            code = await code_provider()
+            try:
+                await self._client.sign_in(phone=self._phone, code=code)
+            except Exception as exc:  # noqa: BLE001
+                # Telethon raises SessionPasswordNeededError when 2FA is set.
+                if exc.__class__.__name__ != "SessionPasswordNeededError":
+                    raise
+                if password_provider is None:
+                    raise RuntimeError(
+                        "Account requires a 2FA password but no"
+                        " password_provider was supplied."
+                    ) from exc
+                password = await password_provider()
+                await self._client.sign_in(password=password)
+
+        self._maybe_save_session()
         me = await self._client.get_me()
         self._log.info(
             "Connected",
@@ -101,15 +121,45 @@ class BotClient:
             username=getattr(me, "username", None),
         )
 
+    async def get_me_summary(self) -> dict[str, Any]:
+        """Return a small dict summarizing the authenticated user."""
+        if self._client is None:
+            return {}
+        me = await self._client.get_me()
+        return {
+            "id": getattr(me, "id", None),
+            "username": getattr(me, "username", None),
+            "first_name": getattr(me, "first_name", None),
+        }
+
     async def stop(self) -> None:
-        """Disconnect, re-encrypt the session, and remove the temp directory."""
-        if self._client is not None:
-            try:
-                await self._client.disconnect()
-            except Exception as exc:  # noqa: BLE001
-                self._log.warning("Disconnect raised", error=str(exc))
+        """Disconnect and persist the final session."""
+        if self._client is None:
+            return
         try:
-            self._persist_session()
-        finally:
-            self._cleanup_tmp()
-            self._client = None
+            await self._client.disconnect()
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning("Disconnect raised", error=str(exc))
+        self._maybe_save_session()
+        self._client = None
+
+    async def run_until_disconnected(self) -> None:
+        """Block until the underlying Telethon client disconnects."""
+        if self._client is None:
+            raise RuntimeError("BotClient.start() has not been called.")
+        await self._client.run_until_disconnected()
+
+    def save_session_now(self) -> None:
+        """Force-persist the current session string. Safe to call repeatedly."""
+        self._maybe_save_session()
+
+
+async def auth_provider_from_queue(
+    queue: asyncio.Queue[str], timeout: float = 300.0
+) -> str:
+    """Helper: wait up to `timeout` seconds for a value pushed onto `queue`.
+
+    Used by the web layer to bridge HTTP POSTs of phone codes / 2FA
+    passwords into the Telethon auth flow.
+    """
+    return await asyncio.wait_for(queue.get(), timeout=timeout)

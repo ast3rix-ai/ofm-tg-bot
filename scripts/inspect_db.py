@@ -43,12 +43,15 @@ def _truncate(value: str | None, width: int) -> str:
     return flat[: width - 1] + "…"
 
 
-def cmd_contacts(db_path: Path, _args: argparse.Namespace) -> int:
-    contacts = storage.get_all_contacts(db_path)
+def cmd_contacts(db_path: Path, args: argparse.Namespace) -> int:
+    account_id = getattr(args, "account_id", None)
+    contacts = storage.get_all_contacts(db_path, account_id=account_id)
     if not contacts:
         sys.stdout.write("(no contacts)\n")
         return 0
-    headers = ("chat_id", "tg_user_id", "username", "name", "msgs", "last_seen_at")
+    headers = (
+        "account", "chat_id", "tg_user_id", "username", "name", "msgs", "last_seen_at"
+    )
     rows: list[tuple[str, ...]] = []
     for c in contacts:
         name = " ".join(
@@ -56,6 +59,7 @@ def cmd_contacts(db_path: Path, _args: argparse.Namespace) -> int:
         )
         rows.append(
             (
+                str(c["account_id"]),
                 str(c["chat_id"]),
                 str(c["tg_user_id"]),
                 str(c.get("username") or ""),
@@ -69,7 +73,9 @@ def cmd_contacts(db_path: Path, _args: argparse.Namespace) -> int:
 
 
 def cmd_messages(db_path: Path, args: argparse.Namespace) -> int:
-    messages = storage.get_recent_messages(db_path, int(args.chat_id), int(args.limit))
+    messages = storage.get_recent_messages(
+        db_path, int(args.account_id), int(args.chat_id), int(args.limit)
+    )
     if not messages:
         sys.stdout.write("(no messages)\n")
         return 0
@@ -91,7 +97,11 @@ def cmd_messages(db_path: Path, args: argparse.Namespace) -> int:
 
 
 def cmd_events(db_path: Path, args: argparse.Namespace) -> int:
-    events = storage.get_recent_events(db_path, int(args.limit))
+    events = storage.get_recent_events(
+        db_path,
+        limit=int(args.limit),
+        account_id=getattr(args, "account_id", None),
+    )
     if not events:
         sys.stdout.write("(no events)\n")
         return 0
@@ -137,11 +147,14 @@ def _wrap(text: str, width: int = 100) -> list[str]:
 
 
 def cmd_state(db_path: Path, args: argparse.Namespace) -> int:
-    state = storage.get_contact_state(db_path, int(args.chat_id))
+    state = storage.get_contact_state(
+        db_path, int(args.account_id), int(args.chat_id)
+    )
     if state is None:
         sys.stdout.write(f"(no state for chat {args.chat_id})\n")
         return 0
     for key in (
+        "account_id",
         "chat_id",
         "category",
         "funnel_stage",
@@ -162,11 +175,14 @@ def cmd_state(db_path: Path, args: argparse.Namespace) -> int:
 
 
 def cmd_memory(db_path: Path, args: argparse.Namespace) -> int:
-    memory = storage.get_contact_memory(db_path, int(args.chat_id))
+    memory = storage.get_contact_memory(
+        db_path, int(args.account_id), int(args.chat_id)
+    )
     if memory is None:
         sys.stdout.write(f"(no memory for chat {args.chat_id})\n")
         return 0
     for key in (
+        "account_id",
         "chat_id",
         "summary_message_count",
         "last_summarized_at",
@@ -201,25 +217,57 @@ def cmd_migrations(db_path: Path, _args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_accounts(db_path: Path, _args: argparse.Namespace) -> int:
+    from src import accounts as accounts_mod
+
+    rows = accounts_mod.list_accounts(db_path)
+    if not rows:
+        sys.stdout.write("(no accounts)\n")
+        return 0
+    headers = ("id", "label", "active", "username", "tg_user_id", "session", "created")
+    table_rows = [
+        (
+            str(a.id),
+            a.label,
+            "yes" if a.is_active else "no",
+            a.tg_username or "—",
+            str(a.tg_user_id) if a.tg_user_id is not None else "—",
+            "yes" if a.has_session else "no",
+            a.created_at,
+        )
+        for a in rows
+    ]
+    _print_table(headers, table_rows)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Read-only inspection CLI for the local SQLite DB."
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("contacts", help="List contacts with message counts.")
+    p_acc = sub.add_parser("accounts", help="List configured accounts.")
+    p_acc.add_argument("--show-creds", action="store_true")
 
-    p_msg = sub.add_parser("messages", help="Show recent messages for a chat_id.")
+    p_con = sub.add_parser("contacts", help="List contacts with message counts.")
+    p_con.add_argument("--account-id", type=int, default=None)
+
+    p_msg = sub.add_parser("messages", help="Show recent messages for a chat.")
+    p_msg.add_argument("account_id", type=int)
     p_msg.add_argument("chat_id", type=int)
     p_msg.add_argument("--limit", type=int, default=30)
 
     p_evt = sub.add_parser("events", help="Show recent operational events.")
     p_evt.add_argument("--limit", type=int, default=50)
+    p_evt.add_argument("--account-id", type=int, default=None)
 
-    p_state = sub.add_parser("state", help="Show contact_state for a chat_id.")
+    p_state = sub.add_parser("state", help="Show contact_state for a chat.")
+    p_state.add_argument("account_id", type=int)
     p_state.add_argument("chat_id", type=int)
 
-    p_mem = sub.add_parser("memory", help="Show contact_memory for a chat_id.")
+    p_mem = sub.add_parser("memory", help="Show contact_memory for a chat.")
+    p_mem.add_argument("account_id", type=int)
     p_mem.add_argument("chat_id", type=int)
 
     sub.add_parser("migrations", help="List applied schema migrations.")
@@ -233,6 +281,8 @@ def main(argv: list[str] | None = None) -> int:
     if not db_path.exists():
         sys.stderr.write(f"DB not found at {db_path}\n")
         return 1
+    if args.command == "accounts":
+        return cmd_accounts(db_path, args)
     if args.command == "contacts":
         return cmd_contacts(db_path, args)
     if args.command == "messages":

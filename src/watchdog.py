@@ -23,16 +23,19 @@ class Watchdog:
 
     def __init__(
         self,
+        *,
         client: BotClient,
         db_path: Path,
         notifier: Notifier,
         interval_seconds: int,
+        account_id: int | None = None,
     ) -> None:
         self._client = client
         self._db_path = db_path
         self._notifier = notifier
         self._interval = max(1, int(interval_seconds))
-        self._log = logger.bind(module=__name__)
+        self._account_id = account_id
+        self._log = logger.bind(module=__name__, account_id=account_id)
         self._stop_requested = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
@@ -70,6 +73,7 @@ class Watchdog:
             self._db_path,
             "heartbeat",
             {"connected": connected},
+            account_id=self._account_id,
         )
         if connected:
             return
@@ -110,6 +114,7 @@ class Watchdog:
                     self._db_path,
                     "reconnect",
                     {"attempts": attempt, "outage_seconds": outage_seconds},
+                    account_id=self._account_id,
                 )
                 return
 

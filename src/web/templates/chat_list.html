@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Chats — ofm-tg-bot{% endblock %}
+{% block content %}
+<div class="flex items-center mb-4 gap-3">
+  <h1 class="text-2xl font-semibold">Chats</h1>
+  <form method="get" action="/chats" class="ml-auto flex items-center gap-2">
+    <label class="text-sm text-zinc-600">Account</label>
+    <select name="account_id" onchange="this.form.submit()"
+            class="border border-zinc-300 rounded px-2 py-1 text-sm">
+      {% for a in accounts %}
+        <option value="{{ a.id }}" {% if selected_account and a.id == selected_account.id %}selected{% endif %}>
+          {{ a.label }}{% if a.is_active %} (active){% endif %}
+        </option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
+
+{% if not selected_account %}
+<div class="bg-white rounded shadow border border-zinc-200 p-8 text-center text-zinc-500">
+  No accounts yet.
+</div>
+{% else %}
+<div class="bg-white rounded shadow border border-zinc-200">
+  {% if contacts %}
+  <table class="w-full text-sm">
+    <thead class="bg-zinc-100 text-left">
+      <tr>
+        <th class="px-4 py-2">Chat</th>
+        <th class="px-4 py-2">Username</th>
+        <th class="px-4 py-2">Category</th>
+        <th class="px-4 py-2">Human active</th>
+        <th class="px-4 py-2">Last seen</th>
+        <th class="px-4 py-2">Messages</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for c in contacts %}
+      <tr class="border-t border-zinc-100">
+        <td class="px-4 py-2">
+          <a href="/chats/{{ c.chat_id }}?account_id={{ selected_account.id }}"
+             class="text-emerald-700 hover:underline">
+            {{ c.first_name or "" }} {{ c.last_name or "" }}{% if not c.first_name and not c.last_name %}<span class="font-mono">{{ c.chat_id }}</span>{% endif %}
+          </a>
+        </td>
+        <td class="px-4 py-2 font-mono">{{ c.username or "—" }}</td>
+        <td class="px-4 py-2">
+          {% if c.category %}<span class="bg-zinc-100 px-2 py-1 rounded text-xs">{{ c.category }}</span>{% else %}<span class="text-zinc-400">—</span>{% endif %}
+        </td>
+        <td class="px-4 py-2">
+          {% if c.human_active %}<span class="bg-amber-100 text-amber-800 px-2 py-1 rounded text-xs">yes</span>{% else %}<span class="text-zinc-400">—</span>{% endif %}
+        </td>
+        <td class="px-4 py-2 font-mono text-xs">{{ c.last_seen_at }}</td>
+        <td class="px-4 py-2">{{ c.message_count }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="p-8 text-center text-zinc-500">No contacts yet for this account.</div>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

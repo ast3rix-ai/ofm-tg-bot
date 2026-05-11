@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Chat {{ chat_id }} — ofm-tg-bot{% endblock %}
+{% block content %}
+<div class="flex items-center mb-4 gap-3">
+  <a href="/chats?account_id={{ account.id }}" class="text-zinc-500 hover:underline">← Chats</a>
+  <h1 class="text-2xl font-semibold">
+    {% if contact %}
+      {{ contact.first_name or "" }} {{ contact.last_name or "" }}
+      {% if contact.username %}<span class="text-zinc-500">@{{ contact.username }}</span>{% endif %}
+    {% else %}
+      Chat <span class="font-mono">{{ chat_id }}</span>
+    {% endif %}
+  </h1>
+  <span class="text-sm text-zinc-500 ml-2">{{ account.label }}</span>
+</div>
+
+<div class="grid md:grid-cols-3 gap-6">
+  <div class="md:col-span-2 bg-white rounded shadow border border-zinc-200">
+    <div class="px-4 py-2 border-b border-zinc-200 text-sm text-zinc-500 flex items-center">
+      <span>{{ messages|length }} messages (latest at bottom)</span>
+      <a href="/chats/{{ chat_id }}?account_id={{ account.id }}" class="ml-auto text-emerald-700 hover:underline">Refresh</a>
+    </div>
+    <div class="px-4 py-3 max-h-[70vh] overflow-auto space-y-2">
+      {% for m in messages %}
+        <div class="flex {% if m.direction == 'out' %}justify-end{% endif %}">
+          <div class="max-w-[80%] {% if m.direction == 'out' %}bg-emerald-100 text-emerald-900{% else %}bg-zinc-100 text-zinc-900{% endif %} rounded px-3 py-2 text-sm">
+            <div class="text-xs text-zinc-500 mb-1 font-mono">
+              {{ m.direction }} · {{ m.created_at }}{% if m.media_type %} · {{ m.media_type }}{% endif %}
+            </div>
+            <div class="whitespace-pre-wrap break-words">{{ m.text or "" }}</div>
+          </div>
+        </div>
+      {% endfor %}
+      {% if not messages %}
+      <p class="text-zinc-500 text-sm">No messages yet.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="space-y-6">
+    <div class="bg-white rounded shadow border border-zinc-200 p-4">
+      <h2 class="font-semibold mb-2 text-sm">State</h2>
+      {% if state %}
+      <dl class="text-xs grid grid-cols-2 gap-x-3 gap-y-1">
+        <dt class="text-zinc-500">Category</dt><dd>{{ state.category or "—" }}</dd>
+        <dt class="text-zinc-500">Funnel stage</dt><dd>{{ state.funnel_stage or "—" }}</dd>
+        <dt class="text-zinc-500">Confidence</dt><dd>{{ state.last_classifier_confidence or "—" }}</dd>
+        <dt class="text-zinc-500">Human active</dt><dd>{{ state.human_active }}</dd>
+        <dt class="text-zinc-500">Updated</dt><dd class="font-mono">{{ state.updated_at }}</dd>
+      </dl>
+      <details class="mt-3">
+        <summary class="text-xs text-zinc-500 cursor-pointer">flags</summary>
+        <pre class="text-xs bg-zinc-50 p-2 rounded mt-1">{{ state.flags | tojson(indent=2) }}</pre>
+      </details>
+      {% else %}
+      <p class="text-zinc-500 text-xs">No state — populated from Phase 4.</p>
+      {% endif %}
+    </div>
+
+    <div class="bg-white rounded shadow border border-zinc-200 p-4">
+      <h2 class="font-semibold mb-2 text-sm">Memory</h2>
+      {% if memory %}
+      <details>
+        <summary class="text-xs text-zinc-500 cursor-pointer">facts</summary>
+        <pre class="text-xs bg-zinc-50 p-2 rounded mt-1">{{ memory.facts | tojson(indent=2) }}</pre>
+      </details>
+      <div class="mt-2 text-xs">
+        <div class="text-zinc-500">summary</div>
+        <p class="whitespace-pre-wrap">{{ memory.summary or "(empty)" }}</p>
+      </div>
+      {% else %}
+      <p class="text-zinc-500 text-xs">No memory — populated from Phase 4.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

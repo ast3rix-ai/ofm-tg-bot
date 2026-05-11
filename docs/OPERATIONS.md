@@ -9,16 +9,23 @@ This document covers day-to-day operation. Sections are added as features land.
 python -m src.main
 ```
 
-First-run prompts on stdin for the SMS code and 2FA password if set. Subsequent runs reuse the encrypted session at `data/session.enc` and skip auth.
+This starts the bot host (UI + lifecycle manager). The process does **not** auto-connect to Telegram until an account is marked active.
 
-Stop with `Ctrl+C` (SIGINT). The bot shuts down gracefully:
+Open `http://127.0.0.1:8765` in a browser. From there:
 
-1. Watchdog stops.
-2. Telethon disconnects.
-3. The decrypted session is re-encrypted to `data/session.enc` and the temp directory `data/.session_tmp/` is removed.
-4. A `Bot stopped` alert is sent to the operator chat.
+- **First run after Phase 2 upgrade.** If your `.env` has `TG_API_ID` / `TG_API_HASH` / `TG_PHONE`, those are imported as the "Default" account during migration 003 and marked active. If `UI_AUTO_ACTIVATE=true` (the default) and the legacy session was successfully converted, the bot reconnects automatically within ~5 seconds — green badge in the top-right.
+- **If the legacy session couldn't be converted**, the Default account exists but has no session blob. Click **View** → **Start Auth** to re-authenticate (one-time).
+- **Adding a new account.** Click **+ Add Account**, fill in label / API ID / API hash / phone, save. The form redirects you to the auth wizard. Click **Start Auth**, then enter the SMS code from Telegram when prompted, then the 2FA password if your account has one. The page transitions to the green "running" state on success.
+- **Swapping accounts.** On `/accounts`, click **Activate** on a different row. The previously-active account is deactivated automatically before the new one starts.
+- **Inspecting a chat.** Navigate to **Chats**, pick the right account in the dropdown, click a contact, view the last 100 messages.
 
-If you see `data/.session_tmp/` left behind after a stop, the shutdown did not complete cleanly — re-check `logs/bot.log` for the trailing entries.
+Stop with `Ctrl+C` in the terminal that runs `python -m src.main`. The bot:
+
+1. Deactivates the active account (watchdog → Telethon disconnect → final session save → set `is_active=0`).
+2. Shuts down uvicorn.
+3. Fires a `Bot host stopped` alert if a notifier is configured.
+
+Sessions live encrypted inside `accounts.session_blob_enc` only — there is no longer a `data/session.enc` file or a `data/.session_tmp/` directory. A clean shutdown will not leave plaintext credentials on disk.
 
 ## Inspecting state
 
@@ -68,26 +75,57 @@ Foreign keys are enforced. Rows in `contact_state` / `contact_memory` must refer
 4. Re-enable the network. The next reconnect attempt should succeed and an `Reconnected` log line should appear; a `reconnect` event is recorded in the DB.
 5. To trigger the operator alert, leave the network off for >5 minutes. A `🚨 Userbot disconnected >5min` message should arrive in the notifier chat. Subsequent re-fires of the same alert key are suppressed for 60 seconds.
 
+## Account credential rotation
+
+To rotate an account's `api_id` / `api_hash` / `phone`:
+
+1. Stop the bot.
+2. Delete the row via the UI **or** with a SQL update (see below).
+3. Add the account again via the UI with the new credentials.
+4. Re-authenticate.
+
+There is intentionally no in-UI "edit credentials" — credential changes on Telegram's side usually require re-authenticating anyway, and editing the encrypted blob piecemeal invites partial-update bugs.
+
+## Deleting an account
+
+The **Delete** button on the accounts list **cascades**: every contact, message, conversation state, and memory row for that account is removed. Events for the deleted account have their `account_id` set to NULL (the event history is preserved as system-level rows). Operational logs in `logs/bot.log` are untouched.
+
+If you want to keep the data, do not delete the account — set it inactive instead and leave the row in place.
+
 ## Rotating the session encryption key
 
-The Fernet key in `SESSION_ENCRYPTION_KEY` protects `data/session.enc` at rest. To rotate:
+The Fernet key in `SESSION_ENCRYPTION_KEY` protects every encrypted column in `accounts` (`tg_api_id_enc`, `tg_api_hash_enc`, `tg_phone_enc`, `session_blob_enc`). To rotate without losing sessions:
 
-1. Stop the bot cleanly (so `session.enc` is freshly written with the *old* key).
-2. Decrypt the session under the old key to a temporary file:
+1. Stop the bot.
+2. Run the rotation helper (writes new ciphertexts in place under a transaction):
+
    ```
    .venv\Scripts\activate
-   python -c "from pathlib import Path; from src.crypto import decrypt_file; decrypt_file(Path('data/session.enc'), Path('data/.session_tmp/userbot.session'), 'OLD_KEY')"
+   python -c "
+   from pathlib import Path
+   from src.accounts import list_accounts, get_account, _fernet, _connect
+   OLD = 'OLD_KEY'
+   NEW = 'NEW_KEY'
+   fo, fn = _fernet(OLD), _fernet(NEW)
+   db = Path('data/bot.db')
+   with _connect(db) as conn:
+       rows = conn.execute('SELECT id, tg_api_id_enc, tg_api_hash_enc, tg_phone_enc, session_blob_enc FROM accounts').fetchall()
+       conn.execute('BEGIN')
+       for r in rows:
+           def re(s):
+               if s is None: return None
+               return fn.encrypt(fo.decrypt(s.encode())).decode()
+           conn.execute('UPDATE accounts SET tg_api_id_enc=?, tg_api_hash_enc=?, tg_phone_enc=?, session_blob_enc=? WHERE id=?',
+               (re(r[1]), re(r[2]), re(r[3]), re(r[4]), r[0]))
+       conn.execute('COMMIT')
+   print('rotated', len(rows), 'accounts')
+   "
    ```
-3. Generate a new key: `python scripts/generate_key.py`.
-4. Re-encrypt under the new key:
-   ```
-   python -c "from pathlib import Path; from src.crypto import encrypt_file; encrypt_file(Path('data/.session_tmp/userbot.session'), Path('data/session.enc'), 'NEW_KEY')"
-   ```
-5. Delete the decrypted temp file: `rm data/.session_tmp/userbot.session`.
-6. Replace `SESSION_ENCRYPTION_KEY` in `.env` with the new key.
-7. Start the bot — confirm it connects without re-auth.
 
-If you ever lose the encryption key, the session blob is unrecoverable. Recovery requires a fresh login (SMS code + 2FA), which Telegram will treat as a new device and may flag.
+3. Replace `SESSION_ENCRYPTION_KEY` in `.env` with the new key.
+4. Start the bot — it should reconnect without re-auth.
+
+If you lose the encryption key, the encrypted columns are unrecoverable: every account must be re-added and re-authenticated.
 
 ## When the bot won't start
 

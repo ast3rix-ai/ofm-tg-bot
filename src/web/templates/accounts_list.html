@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Accounts — ofm-tg-bot{% endblock %}
+{% block content %}
+<div class="flex items-center mb-4">
+  <h1 class="text-2xl font-semibold">Accounts</h1>
+  <a href="/accounts/new"
+     class="ml-auto bg-emerald-700 text-white px-4 py-2 rounded hover:bg-emerald-800">
+    + Add Account
+  </a>
+</div>
+
+<div class="bg-white rounded shadow border border-zinc-200 mb-6 p-4 text-sm">
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <div>
+      <div class="text-zinc-500">State</div>
+      <div class="font-mono">{{ status.state }}</div>
+    </div>
+    <div>
+      <div class="text-zinc-500">Active account</div>
+      <div class="font-mono">{{ status.active_account_id or "—" }}</div>
+    </div>
+    <div>
+      <div class="text-zinc-500">Connected</div>
+      <div class="font-mono">{{ "yes" if status.is_connected else "no" }}</div>
+    </div>
+    <div>
+      <div class="text-zinc-500">Last error</div>
+      <div class="font-mono truncate" title="{{ status.last_error or '' }}">
+        {{ status.last_error or "—" }}
+      </div>
+    </div>
+  </div>
+</div>
+
+{% if accounts %}
+<table class="min-w-full bg-white rounded shadow border border-zinc-200 text-sm">
+  <thead class="bg-zinc-100 text-left">
+    <tr>
+      <th class="px-4 py-2">id</th>
+      <th class="px-4 py-2">Label</th>
+      <th class="px-4 py-2">Telegram</th>
+      <th class="px-4 py-2">Session</th>
+      <th class="px-4 py-2">Active</th>
+      <th class="px-4 py-2">Last connected</th>
+      <th class="px-4 py-2 text-right">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for a in accounts %}
+    <tr class="border-t border-zinc-100">
+      <td class="px-4 py-2 font-mono">{{ a.id }}</td>
+      <td class="px-4 py-2">
+        <a href="/accounts/{{ a.id }}" class="text-emerald-700 hover:underline">{{ a.label }}</a>
+      </td>
+      <td class="px-4 py-2">
+        {% if a.tg_username %}@{{ a.tg_username }}{% elif a.tg_user_id %}id {{ a.tg_user_id }}{% else %}<span class="text-zinc-400">unauth'd</span>{% endif %}
+      </td>
+      <td class="px-4 py-2">
+        {% if a.has_session %}<span class="text-emerald-700">✓</span>{% else %}<span class="text-zinc-400">—</span>{% endif %}
+      </td>
+      <td class="px-4 py-2">
+        {% if a.is_active %}<span class="bg-emerald-100 text-emerald-800 px-2 py-1 rounded text-xs">active</span>{% else %}<span class="text-zinc-400">—</span>{% endif %}
+      </td>
+      <td class="px-4 py-2 font-mono text-xs">{{ a.last_connected_at or "—" }}</td>
+      <td class="px-4 py-2 text-right" x-data="{ confirming: false }">
+        {% if a.is_active %}
+          <form method="post" action="/accounts/{{ a.id }}/deactivate" class="inline">
+            <button class="px-2 py-1 rounded border border-zinc-300 hover:bg-zinc-100">Deactivate</button>
+          </form>
+        {% else %}
+          <form method="post" action="/accounts/{{ a.id }}/activate" class="inline">
+            <button class="px-2 py-1 rounded bg-emerald-700 text-white hover:bg-emerald-800">Activate</button>
+          </form>
+        {% endif %}
+        <a href="/accounts/{{ a.id }}" class="px-2 py-1 rounded border border-zinc-300 hover:bg-zinc-100">View</a>
+        <button @click="confirming = true"
+                class="px-2 py-1 rounded border border-red-300 text-red-700 hover:bg-red-50">Delete</button>
+
+        <div x-show="confirming" x-cloak
+             class="fixed inset-0 z-10 bg-black/40 flex items-center justify-center">
+          <div class="bg-white rounded shadow p-6 max-w-md">
+            <p class="mb-4">Delete account <span class="font-mono">{{ a.label }}</span>? This will CASCADE-delete all of this account's contacts, messages, state, and memory.</p>
+            <div class="flex gap-2 justify-end">
+              <button @click="confirming = false" class="px-3 py-1 rounded border border-zinc-300">Cancel</button>
+              <form method="post" action="/accounts/{{ a.id }}/delete">
+                <button class="px-3 py-1 rounded bg-red-700 text-white">Delete</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="bg-white rounded shadow border border-zinc-200 p-8 text-center text-zinc-500">
+  No accounts yet. <a href="/accounts/new" class="text-emerald-700 hover:underline">Add one.</a>
+</div>
+{% endif %}
+{% endblock %}

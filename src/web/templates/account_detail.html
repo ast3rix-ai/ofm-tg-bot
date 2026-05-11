@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}{{ account.label }} — ofm-tg-bot{% endblock %}
+{% block content %}
+<div class="flex items-center mb-4">
+  <h1 class="text-2xl font-semibold">{{ account.label }}</h1>
+  <span class="ml-3 text-sm text-zinc-500">id {{ account.id }}</span>
+  <div class="ml-auto flex gap-2">
+    {% if account.is_active %}
+      <form method="post" action="/accounts/{{ account.id }}/deactivate">
+        <button class="px-3 py-1 rounded border border-zinc-300 hover:bg-zinc-100">Deactivate</button>
+      </form>
+    {% else %}
+      <form method="post" action="/accounts/{{ account.id }}/activate">
+        <button class="px-3 py-1 rounded bg-emerald-700 text-white hover:bg-emerald-800">Activate</button>
+      </form>
+    {% endif %}
+    <a href="/chats?account_id={{ account.id }}"
+       class="px-3 py-1 rounded border border-zinc-300 hover:bg-zinc-100">View chats</a>
+  </div>
+</div>
+
+<div class="grid md:grid-cols-2 gap-6">
+  <div class="bg-white rounded shadow border border-zinc-200 p-4">
+    <h2 class="font-semibold mb-2">Profile</h2>
+    <dl class="text-sm grid grid-cols-2 gap-x-4 gap-y-2">
+      <dt class="text-zinc-500">Telegram user id</dt><dd class="font-mono">{{ account.tg_user_id or "—" }}</dd>
+      <dt class="text-zinc-500">Username</dt><dd class="font-mono">@{{ account.tg_username or "—" }}</dd>
+      <dt class="text-zinc-500">Created</dt><dd class="font-mono">{{ account.created_at }}</dd>
+      <dt class="text-zinc-500">Last connected</dt><dd class="font-mono">{{ account.last_connected_at or "—" }}</dd>
+      <dt class="text-zinc-500">Has session</dt><dd>{{ "yes" if account.has_session else "no" }}</dd>
+      <dt class="text-zinc-500">Active</dt><dd>{{ "yes" if account.is_active else "no" }}</dd>
+    </dl>
+  </div>
+
+  <div class="bg-white rounded shadow border border-zinc-200 p-4">
+    <h2 class="font-semibold mb-2">Contacts ({{ contacts|length }})</h2>
+    {% if contacts %}
+    <div class="max-h-80 overflow-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-zinc-100 text-left sticky top-0">
+          <tr><th class="px-2 py-1">Chat</th><th class="px-2 py-1">Username</th><th class="px-2 py-1">Msgs</th></tr>
+        </thead>
+        <tbody>
+        {% for c in contacts %}
+          <tr class="border-t border-zinc-100">
+            <td class="px-2 py-1">
+              <a href="/chats/{{ c.chat_id }}?account_id={{ account.id }}" class="text-emerald-700 hover:underline">{{ c.first_name or c.chat_id }}</a>
+            </td>
+            <td class="px-2 py-1 font-mono">{{ c.username or "—" }}</td>
+            <td class="px-2 py-1">{{ c.message_count }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-zinc-500 text-sm">No contacts yet.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="mt-6 bg-white rounded shadow border border-zinc-200 p-4">
+  <h2 class="font-semibold mb-2">Recent events</h2>
+  {% if events %}
+  <div class="max-h-96 overflow-auto">
+    <table class="w-full text-sm">
+      <thead class="bg-zinc-100 text-left sticky top-0">
+        <tr><th class="px-2 py-1">When</th><th class="px-2 py-1">Type</th><th class="px-2 py-1">Payload</th></tr>
+      </thead>
+      <tbody>
+      {% for e in events %}
+        <tr class="border-t border-zinc-100">
+          <td class="px-2 py-1 font-mono text-xs">{{ e.created_at }}</td>
+          <td class="px-2 py-1 font-mono text-xs">{{ e.event_type }}</td>
+          <td class="px-2 py-1 font-mono text-xs truncate" title="{{ e.payload_json }}">{{ e.payload_json }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="text-zinc-500 text-sm">No events yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}ofm-tg-bot{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, sans-serif; }
+    pre.log { white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body class="bg-zinc-50 text-zinc-900 min-h-screen flex flex-col">
+  <nav class="bg-zinc-900 text-zinc-100 px-6 py-3 flex items-center gap-6">
+    <a href="/accounts" class="font-semibold">ofm-tg-bot</a>
+    <a href="/accounts" class="hover:underline">Accounts</a>
+    <a href="/chats" class="hover:underline">Chats</a>
+    <a href="/logs" class="hover:underline">Logs</a>
+    <a href="/system/status" class="hover:underline" target="_blank">Status JSON</a>
+
+    <div class="ml-auto"
+         x-data="statusBadge()"
+         x-init="poll()">
+      <span class="px-2 py-1 rounded text-sm"
+            :class="badgeClass"
+            :title="tooltip">
+        <span x-text="emoji"></span>
+        <span x-text="label"></span>
+      </span>
+    </div>
+  </nav>
+
+  <main class="flex-1 p-6 max-w-7xl w-full mx-auto">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="px-6 py-2 text-zinc-500 text-xs border-t border-zinc-200">
+    localhost only — single-operator admin panel
+  </footer>
+
+  <script>
+    function statusBadge() {
+      return {
+        state: 'idle',
+        tooltip: '',
+        emoji: '⚫',
+        label: 'idle',
+        badgeClass: 'bg-zinc-700 text-zinc-100',
+        async poll() {
+          await this.refresh();
+          setInterval(() => this.refresh(), 5000);
+        },
+        async refresh() {
+          try {
+            const r = await fetch('/system/status');
+            const j = await r.json();
+            const s = j.bot.state;
+            this.state = s;
+            this.label = s;
+            this.tooltip = j.bot.last_error || '';
+            if (s === 'running') {
+              this.emoji = '🟢'; this.badgeClass = 'bg-emerald-700 text-white';
+            } else if (s === 'starting' || s === 'awaiting_code' || s === 'awaiting_password') {
+              this.emoji = '🟡'; this.badgeClass = 'bg-amber-600 text-white';
+            } else if (s === 'error') {
+              this.emoji = '🔴'; this.badgeClass = 'bg-red-700 text-white';
+            } else if (s === 'stopping') {
+              this.emoji = '🟠'; this.badgeClass = 'bg-orange-600 text-white';
+            } else {
+              this.emoji = '⚫'; this.badgeClass = 'bg-zinc-700 text-zinc-100';
+            }
+          } catch (e) {
+            this.emoji = '❓'; this.label = 'unreachable';
+            this.badgeClass = 'bg-zinc-500 text-zinc-100';
+          }
+        },
+      };
+    }
+  </script>
+</body>
+</html>

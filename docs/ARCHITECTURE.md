@@ -37,7 +37,33 @@ Sits between response generator and Telegram client. Splits long replies into 2-
 Category → action map. Some categories auto-respond; some queue for operator review in a control chat; some are ignored. Operator can take over any chat from the control chat, which sets a `human_active` flag suppressing bot replies until cleared.
 
 ### 9. Control interface (Phase 3, expanded Phase 7+)
-Local FastAPI app + minimal HTML frontend. Account management (login persistence, swap between accounts), live log viewing, contact inspection, manual chat override. Runs on `localhost` only.
+Local FastAPI app served by uvicorn, mounted into the same process as the bot. Bound strictly to `127.0.0.1:8765` (configurable via `UI_PORT`). No authentication — single-operator local tool. Server-rendered Jinja2 templates with Tailwind + Alpine.js loaded via CDN; no frontend build step.
+
+Routes:
+- `/accounts` — list, add (`/accounts/new` form), activate / deactivate / delete, per-account detail page.
+- `/accounts/<id>/auth` — auth wizard that drives `BotManager.activate()` in the background, polls `/system/status`, and prompts for phone code / 2FA password via Alpine forms.
+- `/chats?account_id=<id>` — contacts list. `/chats/<chat_id>?account_id=<id>` — chat detail with last 100 messages and Phase 4-populated state/memory side panels.
+- `/logs` + `/logs/stream` — live SSE tail of `logs/bot.log`.
+- `/system/status` — JSON snapshot of bot state, active account, applied migrations, uptime.
+
+The web layer never imports Telethon directly — it drives `BotManager`, which owns the lifecycle of the single active `BotClient`.
+
+## Multi-account data model (Phase 3+)
+
+Migration 003 makes the bot multi-account at the data layer:
+
+- `accounts` — one row per operated Telegram account. Holds Fernet-encrypted `api_id`, `api_hash`, `phone`, and `session_blob` (Telethon `StringSession` text). Exactly one row is `is_active=1` at a time, enforced by `accounts.set_active_account()`.
+- All Phase 1/2 row tables (`contacts`, `messages`, `events`, `contact_state`, `contact_memory`) gain an `account_id` column with FKs back to `accounts(id)`.
+- `contacts`, `contact_state`, `contact_memory` use a composite PK `(account_id, chat_id)`, allowing the same Telegram `chat_id` to exist across different operated accounts.
+- `messages.account_id` and (transitively) `contacts.account_id` cascade-delete on account removal; `events.account_id` is nullable for system-wide rows and `ON DELETE SET NULL`.
+
+The Phase 2 → Phase 3 upgrade preserves data: existing rows are copied into the rebuilt tables with `account_id = <default-id>`, and the `.env`'s legacy `TG_API_ID`/`TG_API_HASH`/`TG_PHONE` become the seed for that default account.
+
+## Session lifecycle (Phase 3+)
+
+Sessions live only inside the Fernet-encrypted `accounts.session_blob_enc` column. There is no longer a `.session` file on disk and no plaintext temp file. `BotClient` uses Telethon's `StringSession`, and any session change triggers `accounts.update_session_blob()` via the `on_session_update` callback.
+
+This eliminates the Phase 1 risk of a loose decrypted session file being left behind on abnormal exit.
 
 ## Data flow (steady state, Phase 7+ complete)
 

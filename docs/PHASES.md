@@ -20,9 +20,10 @@ Each phase is independently shippable. Do not implement features from future pha
 **Out of scope:** anything that writes to these tables — populated in Phase 4+.
 
 ## Phase 3 — Control UI shell + multi-account
-**Status:** not started
-**Scope:** FastAPI local web app. Account management (add account, store credentials encrypted, list accounts, switch active account). Live log tail view. Contact list + chat history viewer. No write operations yet.
+**Status:** complete
+**Scope:** FastAPI local web app. Account management (add account, store credentials encrypted, list accounts, switch active account). Live log tail view. Contact list + chat history viewer. Migration 003 introduces `accounts` plus `account_id` on every other table.
 **Out of scope:** manual chat takeover, message sending from UI.
+**Note:** Phase 4 must assume the active-account model — the classifier writes rows scoped to `bot_manager.active_account_id`.
 
 ## Phase 4 — Signal detector + classifier
 **Status:** not started
