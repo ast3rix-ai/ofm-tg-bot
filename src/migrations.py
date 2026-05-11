@@ -361,6 +361,64 @@ def _maybe_convert_legacy_session(context: MigrationContext) -> str | None:
         return None
 
 
+def _apply_migration_004(
+    conn: sqlite3.Connection, _context: MigrationContext
+) -> None:
+    """Phase 4: classifier surface — bot_enabled, bootstrap markers, runs/alerts."""
+    cur = conn.cursor()
+
+    cur.execute("PRAGMA table_info(contact_state)")
+    cs_cols = {r[1] for r in cur.fetchall()}
+    if "bot_enabled" not in cs_cols:
+        cur.execute(
+            "ALTER TABLE contact_state ADD COLUMN bot_enabled INTEGER NOT NULL"
+            " DEFAULT 0"
+        )
+    if "bootstrap_completed_at" not in cs_cols:
+        cur.execute("ALTER TABLE contact_state ADD COLUMN bootstrap_completed_at TEXT")
+    if "last_resurface_at" not in cs_cols:
+        cur.execute("ALTER TABLE contact_state ADD COLUMN last_resurface_at TEXT")
+
+    cur.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS classifier_runs (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id           INTEGER NOT NULL REFERENCES accounts(id)
+                                    ON DELETE CASCADE,
+            chat_id              INTEGER NOT NULL,
+            triggered_by         TEXT NOT NULL,
+            input_message_count  INTEGER NOT NULL,
+            category_before      TEXT,
+            category_after       TEXT,
+            confidence           REAL,
+            flags_before         TEXT,
+            flags_after          TEXT,
+            raw_llm_output       TEXT,
+            latency_ms           INTEGER,
+            created_at           TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_classifier_runs_chat
+            ON classifier_runs (account_id, chat_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS operator_alerts (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id        INTEGER NOT NULL REFERENCES accounts(id)
+                                 ON DELETE CASCADE,
+            chat_id           INTEGER,
+            alert_type        TEXT NOT NULL,
+            severity          TEXT NOT NULL,
+            message           TEXT NOT NULL,
+            payload           TEXT,
+            acknowledged      INTEGER NOT NULL DEFAULT 0,
+            created_at        TEXT NOT NULL,
+            acknowledged_at   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_operator_alerts_unack
+            ON operator_alerts (account_id, acknowledged, created_at DESC);
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     Migration(version=1, name="initial_schema", sql=_MIGRATION_001),
     Migration(version=2, name="contact_state_and_memory", sql=_MIGRATION_002),
@@ -368,6 +426,11 @@ MIGRATIONS: list[Migration] = [
         version=3,
         name="multi_account",
         apply=_apply_migration_003,
+    ),
+    Migration(
+        version=4,
+        name="classifier_runs_and_alerts",
+        apply=_apply_migration_004,
     ),
 ]
 

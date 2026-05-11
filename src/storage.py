@@ -34,6 +34,9 @@ class ContactStateFields(TypedDict, total=False):
     classifier_metadata: dict[str, Any]
     human_active: int
     human_active_until: str | None
+    bot_enabled: int
+    bootstrap_completed_at: str | None
+    last_resurface_at: str | None
 
 
 class ContactMemoryFields(TypedDict, total=False):
@@ -429,6 +432,206 @@ def upsert_contact_memory(
     )
     with _connect(db_path) as conn:
         conn.execute(sql, values)
+
+
+def get_last_inbound_at(
+    db_path: Path, account_id: int, chat_id: int
+) -> str | None:
+    """Return the `created_at` of the most recent inbound message, or None."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT created_at FROM messages"
+            " WHERE account_id = ? AND chat_id = ? AND direction = 'in'"
+            " ORDER BY id DESC LIMIT 1",
+            (account_id, chat_id),
+        ).fetchone()
+    return None if row is None else str(row[0])
+
+
+def insert_classifier_run(
+    db_path: Path,
+    *,
+    account_id: int,
+    chat_id: int,
+    triggered_by: str,
+    input_message_count: int,
+    category_before: str | None,
+    category_after: str | None,
+    confidence: float | None,
+    flags_before: dict[str, Any] | None,
+    flags_after: dict[str, Any] | None,
+    raw_llm_output: str | None,
+    latency_ms: int | None,
+) -> int:
+    now = _utcnow_iso()
+    flags_before_json = (
+        json.dumps(flags_before, default=str, ensure_ascii=False)
+        if flags_before is not None else None
+    )
+    flags_after_json = (
+        json.dumps(flags_after, default=str, ensure_ascii=False)
+        if flags_after is not None else None
+    )
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO classifier_runs (
+                account_id, chat_id, triggered_by, input_message_count,
+                category_before, category_after, confidence,
+                flags_before, flags_after, raw_llm_output, latency_ms,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account_id, chat_id, triggered_by, input_message_count,
+                category_before, category_after, confidence,
+                flags_before_json, flags_after_json, raw_llm_output,
+                latency_ms, now,
+            ),
+        )
+    return int(cur.lastrowid or 0)
+
+
+def get_classifier_runs(
+    db_path: Path, *, account_id: int, chat_id: int, limit: int = 10
+) -> list[dict[str, Any]]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM classifier_runs"
+            " WHERE account_id = ? AND chat_id = ?"
+            " ORDER BY id DESC LIMIT ?",
+            (account_id, chat_id, limit),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        for k in ("flags_before", "flags_after"):
+            v = d.get(k)
+            if isinstance(v, str):
+                try:
+                    d[k] = json.loads(v)
+                except (TypeError, ValueError):
+                    pass
+        out.append(d)
+    return out
+
+
+def insert_operator_alert(
+    db_path: Path,
+    *,
+    account_id: int,
+    chat_id: int | None,
+    alert_type: str,
+    severity: str,
+    message: str,
+    payload: dict[str, Any] | None = None,
+) -> int:
+    now = _utcnow_iso()
+    payload_json = (
+        json.dumps(payload, default=str, ensure_ascii=False)
+        if payload is not None else None
+    )
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO operator_alerts (
+                account_id, chat_id, alert_type, severity, message,
+                payload, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account_id, chat_id, alert_type, severity, message,
+                payload_json, now,
+            ),
+        )
+    return int(cur.lastrowid or 0)
+
+
+def acknowledge_operator_alert(db_path: Path, alert_id: int) -> None:
+    now = _utcnow_iso()
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE operator_alerts SET acknowledged = 1, acknowledged_at = ?"
+            " WHERE id = ?",
+            (now, alert_id),
+        )
+
+
+def list_operator_alerts(
+    db_path: Path,
+    *,
+    account_id: int | None = None,
+    only_unacknowledged: bool = False,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    where: list[str] = []
+    params: list[Any] = []
+    if account_id is not None:
+        where.append("account_id = ?")
+        params.append(account_id)
+    if only_unacknowledged:
+        where.append("acknowledged = 0")
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    params.append(limit)
+    sql = (
+        "SELECT * FROM operator_alerts"
+        + where_sql
+        + " ORDER BY id DESC LIMIT ?"
+    )
+    with _connect(db_path) as conn:
+        rows = conn.execute(sql, params).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        raw = d.get("payload")
+        if isinstance(raw, str):
+            try:
+                d["payload"] = json.loads(raw)
+            except (TypeError, ValueError):
+                pass
+        out.append(d)
+    return out
+
+
+def count_recent_alerts(
+    db_path: Path,
+    *,
+    account_id: int,
+    chat_id: int | None,
+    alert_type: str,
+    since_iso: str,
+) -> int:
+    where = "account_id = ? AND alert_type = ? AND created_at >= ?"
+    params: list[Any] = [account_id, alert_type, since_iso]
+    if chat_id is None:
+        where += " AND chat_id IS NULL"
+    else:
+        where += " AND chat_id = ?"
+        params.append(chat_id)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM operator_alerts WHERE {where}", params
+        ).fetchone()
+    return int(row[0])
+
+
+def chats_needing_bootstrap(
+    db_path: Path, account_id: int
+) -> list[int]:
+    """Return chat_ids that have messages but no bootstrap_completed_at marker."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT c.chat_id
+            FROM contacts c
+            LEFT JOIN contact_state s
+              ON s.account_id = c.account_id AND s.chat_id = c.chat_id
+            WHERE c.account_id = ?
+              AND (s.bootstrap_completed_at IS NULL)
+            """,
+            (account_id,),
+        ).fetchall()
+    return [int(r[0]) for r in rows]
 
 
 def get_contact_memory(

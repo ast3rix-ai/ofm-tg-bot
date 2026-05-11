@@ -16,6 +16,7 @@
     <a href="/accounts" class="font-semibold">ofm-tg-bot</a>
     <a href="/accounts" class="hover:underline">Accounts</a>
     <a href="/chats" class="hover:underline">Chats</a>
+    <a href="/alerts" class="hover:underline">Alerts</a>
     <a href="/logs" class="hover:underline">Logs</a>
     <a href="/system/status" class="hover:underline" target="_blank">Status JSON</a>
 
@@ -61,6 +62,12 @@
             this.tooltip = j.bot.last_error || '';
             if (s === 'running') {
               this.emoji = '🟢'; this.badgeClass = 'bg-emerald-700 text-white';
+              this.label = 'running';
+            } else if (s === 'bootstrapping') {
+              this.emoji = '🟡'; this.badgeClass = 'bg-yellow-600 text-white';
+              const bl = j.bot.backlog || {};
+              if (bl.total) this.label = `bootstrapping (${bl.done}/${bl.total})`;
+              else this.label = 'bootstrapping';
             } else if (s === 'starting' || s === 'awaiting_code' || s === 'awaiting_password') {
               this.emoji = '🟡'; this.badgeClass = 'bg-amber-600 text-white';
             } else if (s === 'error') {

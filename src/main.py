@@ -11,6 +11,7 @@ from src import accounts as accounts_mod
 from src import storage
 from src.bot_manager import BotManager
 from src.config import Config, ConfigError, load_config
+from src.llm.client import LLMClient
 from src.logging_config import setup_logging
 from src.notifier import Notifier
 from src.web.app import create_app
@@ -50,11 +51,44 @@ async def main() -> None:
     log.info("DB initialized", db_path=str(config.db_path))
 
     notifier = Notifier(config.notifier_bot_token, config.notifier_chat_id)
+    llm = LLMClient(
+        host=config.ollama_host,
+        model=config.llm_model,
+        timeout_seconds=config.llm_timeout_seconds,
+        max_retries=config.llm_max_retries,
+    )
+    # Best-effort health check at boot — logs warn if Ollama is unreachable
+    # or the model isn't pulled. Does not block startup.
+    if config.llm_model:
+        try:
+            ok = await llm.ping()
+            if ok:
+                log.info("LLM reachable", model=config.llm_model)
+            else:
+                log.warning(
+                    "LLM health check failed at boot",
+                    health=llm.health(),
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("LLM ping raised", error=str(exc))
+    else:
+        log.warning(
+            "LLM_MODEL is not configured — classification will be skipped"
+            " until set (see docs/MODEL_SELECTION.md)"
+        )
+
     bot_manager = BotManager(
         db_path=config.db_path,
         encryption_key=config.session_encryption_key,
         notifier=notifier,
+        llm=llm,
         heartbeat_interval_seconds=config.heartbeat_interval_seconds,
+        confidence_threshold=config.classifier_confidence_threshold,
+        bootstrap_history_messages=config.bootstrap_history_messages,
+        bootstrap_history_days=config.bootstrap_history_days,
+        bootstrap_max_concurrent=config.bootstrap_max_concurrent,
+        backlog_max_concurrent=config.backlog_max_concurrent,
+        resurface_dormant_days=config.resurface_dormant_days,
     )
 
     app = create_app(config=config, bot_manager=bot_manager, notifier=notifier)

@@ -14,11 +14,15 @@ from src.notifier import Notifier
 
 @pytest.fixture
 def manager(db: Path, encryption_key: str) -> BotManager:
+    from src.llm.client import LLMClient
+
     notifier = Notifier(token=None, chat_id=None)
+    llm = LLMClient(host="http://127.0.0.1:11434", model=None)
     return BotManager(
         db_path=db,
         encryption_key=encryption_key,
         notifier=notifier,
+        llm=llm,
         heartbeat_interval_seconds=60,
     )
 

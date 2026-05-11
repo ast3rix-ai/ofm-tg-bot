@@ -67,6 +67,45 @@ When adding a new migration:
 
 Foreign keys are enforced. Rows in `contact_state` / `contact_memory` must reference an existing `contacts.chat_id` (the event handler upserts the contact before any pipeline step writes state, so this is automatic in normal operation).
 
+## First connect to an existing account (bootstrap)
+
+When the bot activates an account that has existing dialogs without `bootstrap_completed_at`, it enters the `bootstrapping` state. The footer badge turns yellow with progress `(done/total)`. For each existing chat the bot pulls up to `BOOTSTRAP_HISTORY_MESSAGES` messages (or the messages from the last `BOOTSTRAP_HISTORY_DAYS` days — whichever is larger), persists them, and runs `Classifier.bootstrap_chat`. Concurrency is capped at `BOOTSTRAP_MAX_CONCURRENT`.
+
+**Bootstrapped chats have `bot_enabled = 0`.** The bot must not reply until the operator flips the toggle in `Chats → <contact> → State → bot: OFF/ON`. Chats seen live from message 1 have `bot_enabled = 1` by default.
+
+After bootstrap, the bot runs an **unread catchup** for every dialog with `unread_count > 0` (messages missed while the bot was offline). Each unread message is classified the same way as a live one. State transitions to `running` once both phases finish.
+
+## Reviewing classifier output
+
+`/chats?account_id=<id>` shows category per contact. Click a contact to open the chat detail — the right rail shows the latest classifier output, confidence, flags, and a collapsible **Classifier runs** section with the last 10 runs (timestamp, trigger source, category-before → category-after, latency, raw LLM output).
+
+Classifier runs include rule-based fast paths (`triggered_by = "rule:greeting"`) — those have zero latency and an empty raw output.
+
+## Acknowledging operator alerts
+
+`/alerts` lists every `operator_alerts` row. Types so far:
+
+- `threat_detected` — signal-detector or classifier flagged a real-world threat. Notifier fires immediately too (deduped 1/chat/hour). Red row.
+- `low_confidence` — classifier confidence under `CLASSIFIER_CONFIDENCE_THRESHOLD`. Routing in Phase 7 will use these to route to human handoff.
+- `classifier_parse_failure` — LLM output couldn't be parsed twice. State left untouched; review raw output via the alert's payload.
+- `bootstrap_failed` — bootstrap LLM call failed or output was malformed. The chat stays unbootstrapped; re-running the bot retries it.
+
+Use the **Ack** button to mark an alert resolved. Acked alerts stay in the table for audit; they just disappear from the "only un-acknowledged" filter.
+
+## Tuning the confidence threshold
+
+`CLASSIFIER_CONFIDENCE_THRESHOLD` in `.env` controls when `low_confidence` alerts fire. Default 0.6. Raise to be stricter (more handoffs), lower to be looser. Change takes effect on next bot start.
+
+## What to do if a chat is mis-classified
+
+The classifier re-runs on every new inbound message, so misclassifications self-correct as the conversation continues. If you need to force a correction now:
+
+1. Open the chat detail page.
+2. Note the current category and the `bot_enabled` state.
+3. (Phase 7 will add a manual "re-run classifier" button. For now, the next inbound message triggers a re-run automatically.)
+
+If the bot is mis-replying (Phase 5+), flip `bot_enabled` off and handle the chat by hand.
+
 ## Verifying the watchdog (simulated disconnect)
 
 1. Start the bot.

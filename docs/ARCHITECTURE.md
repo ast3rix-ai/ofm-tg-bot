@@ -21,11 +21,14 @@ All access goes through module-level functions; there is no ORM. JSON columns ar
 ### 3. Event handler (`src/event_handler.py`)
 Subscribes to incoming DM events from the Telegram client. For each message: persist, then dispatch to the pipeline. Holds per-chat asyncio locks. Catches and logs all exceptions; never lets the handler die silently.
 
-### 4. Signal detector (Phase 4+)
-Fast deterministic pattern matcher. Runs on every inbound message before the classifier. Detects events that force state transitions regardless of LLM judgment: explicit price asks, payment screenshots, slurs, prolonged silence on outbound. Cheap, regex- and keyword-based.
+### 4. Signal detector (`src/signal_detector.py`)
+Fast deterministic pattern matcher. Runs on every inbound message before the classifier. Each detector is independent and pure (regex/keyword on text, plus a DB lookup for `detect_resurface`). Output is a frozen `SignalResult`. Used by the classifier's fast path (greeting-only → skip LLM) and by the threat-alert path (signal-detector threats fire alerts even if the LLM classification is benign). Conservative keyword sets — false negatives are acceptable, false positives create alert fatigue.
 
-### 5. Classifier (Phase 4+)
-Hybrid: rules-first for high-frequency obvious cases (menu requests, price requests, common openers), LLM for ambiguous cases. Outputs category + confidence. Below-threshold confidence routes to operator handoff. Re-runs on each turn.
+### 5. Classifier (`src/classifier.py`)
+Hybrid: rules-first fast path for greeting-only openers on fresh chats (no LLM call), LLM call otherwise. Output validated against a fixed JSON schema and the closed category set in `docs/CATEGORIES.md`; parse failures retry once with a stricter prompt then fall back to recording an `operator_alerts` row with type `classifier_parse_failure`, leaving prior `contact_state` untouched. Below-threshold confidence emits a `low_confidence` alert. Threats from either the signal detector or the classifier fire `notifier.alert()` synchronously and write a `threat_detected` alert (deduped per chat per hour). Every run is recorded in `classifier_runs` for forensics.
+
+### 5b. Backlog processor (`src/backlog.py`)
+Orchestrates two catchup flows the `BotManager` runs on every account activation: (a) **initial bootstrap** — for chats without `bootstrap_completed_at`, pull `max(N messages, last N days)` of history, persist, run `Classifier.bootstrap_chat`; (b) **unread catchup** — for chats with `unread_count > 0`, fetch the unread tail and push through the normal signal-detector + classifier path. Concurrency bounded by per-phase semaphores. Progress visible via `BotManager.status().backlog`.
 
 ### 6. Response generator (Phase 5+)
 LLM call. Inputs: persona document, distilled contact memory, rolling message window (~30), category-specific instruction. Output: reply text, possibly multi-part. Output validation rejects AI-tell patterns and triggers re-roll.
@@ -47,6 +50,22 @@ Routes:
 - `/system/status` — JSON snapshot of bot state, active account, applied migrations, uptime.
 
 The web layer never imports Telethon directly — it drives `BotManager`, which owns the lifecycle of the single active `BotClient`.
+
+## Activation state machine (Phase 4+)
+
+```
+idle → starting → awaiting_code → awaiting_password → bootstrapping → running
+                                                                    ↘ error
+running → stopping → idle
+```
+
+`bootstrapping` covers both initial-bootstrap and unread-catchup phases. The live event handler is registered before bootstrap starts; new live messages during this window are persisted but their classification is deferred onto an in-memory pending list, drained by `EventHandler.flush_pending()` once `bootstrapping → running`.
+
+## LLM layer
+
+`src/llm/client.py` wraps `ollama.AsyncClient`. `LLMClient.generate()` retries connection-level failures (tenacity, exponential backoff, configurable max retries); model-side errors surface as `LLMError` without retry. `LLMClient.ping()` is the health check shown in `/system/status` and the UI footer. Model selection lives in `docs/MODEL_SELECTION.md` and is set via `LLM_MODEL` in `.env` — no hard-coding anywhere in the code.
+
+Prompts (`src/llm/prompts.py`) are centralized as pure functions returning strings. Each prompt embeds the category taxonomy and a fixed JSON output schema; few-shot examples are synthetic until Phase 8 supplies real samples (marked `TODO(phase-8)`).
 
 ## Multi-account data model (Phase 3+)
 

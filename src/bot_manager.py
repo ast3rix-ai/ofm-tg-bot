@@ -10,13 +10,24 @@ from loguru import logger
 
 from src import accounts
 from src.accounts import AccountsError
+from src.backlog import BacklogProcessor
+from src.classifier import Classifier
 from src.event_handler import EventHandler
+from src.llm.client import LLMClient
 from src.notifier import Notifier
 from src.telegram_client import BotClient, auth_provider_from_queue
 from src.watchdog import Watchdog
 
-State = Literal["idle", "starting", "awaiting_code", "awaiting_password", "running",
-                "stopping", "error"]
+State = Literal[
+    "idle",
+    "starting",
+    "awaiting_code",
+    "awaiting_password",
+    "bootstrapping",
+    "running",
+    "stopping",
+    "error",
+]
 
 
 def _utcnow_iso() -> str:
@@ -37,12 +48,26 @@ class BotManager:
         db_path: Path,
         encryption_key: str,
         notifier: Notifier,
+        llm: LLMClient,
         heartbeat_interval_seconds: int = 60,
+        confidence_threshold: float = 0.6,
+        bootstrap_history_messages: int = 100,
+        bootstrap_history_days: int = 30,
+        bootstrap_max_concurrent: int = 3,
+        backlog_max_concurrent: int = 5,
+        resurface_dormant_days: int = 14,
     ) -> None:
         self._db_path = db_path
         self._encryption_key = encryption_key
         self._notifier = notifier
         self._heartbeat = heartbeat_interval_seconds
+        self._llm = llm
+        self._confidence_threshold = confidence_threshold
+        self._bootstrap_history_messages = bootstrap_history_messages
+        self._bootstrap_history_days = bootstrap_history_days
+        self._bootstrap_max_concurrent = bootstrap_max_concurrent
+        self._backlog_max_concurrent = backlog_max_concurrent
+        self._resurface_dormant_days = resurface_dormant_days
         self._log = logger.bind(module=__name__)
 
         self._client: BotClient | None = None
@@ -50,6 +75,8 @@ class BotManager:
         self._watchdog: Watchdog | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._run_task: asyncio.Task[None] | None = None
+        self._backlog: BacklogProcessor | None = None
+        self._classifier: Classifier | None = None
 
         self._state: State = "idle"
         self._active_account_id: int | None = None
@@ -70,6 +97,9 @@ class BotManager:
             connected_since_iso = datetime.fromtimestamp(
                 time.time() - uptime_seconds, tz=UTC
             ).isoformat()
+        progress: dict[str, Any] | None = None
+        if self._backlog is not None:
+            progress = self._backlog.progress()
         return {
             "state": self._state,
             "active_account_id": self._active_account_id,
@@ -77,6 +107,8 @@ class BotManager:
             "connected_since": connected_since_iso,
             "uptime_seconds": uptime_seconds,
             "is_connected": self._client.is_connected() if self._client else False,
+            "backlog": progress,
+            "llm": self._llm.health(),
         }
 
     @property
@@ -215,11 +247,22 @@ class BotManager:
 
         accounts.set_active_account(self._db_path, account_id)
 
+        # Construct classifier + event handler. Event handler defers live
+        # messages onto an internal queue until bootstrap completes.
+        self._classifier = Classifier(
+            db_path=self._db_path,
+            llm=self._llm,
+            notifier=self._notifier,
+            confidence_threshold=self._confidence_threshold,
+            history_window=30,
+        )
         self._event_handler = EventHandler(
             client=client,
             db_path=self._db_path,
             notifier=self._notifier,
             account_id=account_id,
+            classifier=self._classifier,
+            resurface_threshold_days=self._resurface_dormant_days,
         )
         await self._event_handler.setup()
 
@@ -235,6 +278,24 @@ class BotManager:
         )
         self._watchdog.attach_task(self._watchdog_task)
 
+        # Best-effort LLM health check; failure is logged but non-blocking.
+        try:
+            await self._llm.ping()
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning("LLM health check raised", error=str(exc))
+
+        self._backlog = BacklogProcessor(
+            db_path=self._db_path,
+            client=client,
+            classifier=self._classifier,
+            account_id=account_id,
+            history_messages=self._bootstrap_history_messages,
+            history_days=self._bootstrap_history_days,
+            bootstrap_concurrency=self._bootstrap_max_concurrent,
+            catchup_concurrency=self._backlog_max_concurrent,
+            resurface_threshold_days=self._resurface_dormant_days,
+        )
+
         self._run_task = asyncio.create_task(
             client.run_until_disconnected(),
             name=f"run-until-disconnected-{account_id}",
@@ -242,12 +303,37 @@ class BotManager:
 
         self._code_queue = None
         self._password_queue = None
-        self._state = "running"
+        self._state = "bootstrapping"
         self._connected_since = time.monotonic()
-        self._log.info("Account active", account_id=account_id, label=account.label)
+        self._log.info("Account active — starting bootstrap", account_id=account_id)
+
+        # Run bootstrap + catchup. Live event handler is already registered;
+        # it queues messages until `_state` flips to "running".
+        if self._llm.health().get("model_loaded"):
+            try:
+                bootstrap_report = await self._backlog.run_initial_bootstrap()
+                catchup_report = await self._backlog.run_unread_catchup()
+                self._log.info(
+                    "Backlog finished",
+                    bootstrap=bootstrap_report,
+                    catchup=catchup_report,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._log.error("Backlog phase failed", error=str(exc))
+                self._last_error = f"backlog failed: {exc}"
+        else:
+            self._log.warning(
+                "LLM not ready — skipping bootstrap/catchup; "
+                "live classification will degrade until Ollama is reachable",
+                llm=self._llm.health(),
+            )
+
+        self._state = "running"
+        self._log.info("Account active and running", account_id=account_id)
         await self._notifier.alert(
             f"Account active: {account.label}", severity="info"
         )
+        await self._event_handler.flush_pending()
 
     async def _deactivate_locked(self) -> None:
         if self._state == "idle" and self._client is None:
@@ -275,6 +361,8 @@ class BotManager:
         self._watchdog = None
         self._watchdog_task = None
         self._run_task = None
+        self._backlog = None
+        self._classifier = None
         self._active_account_id = None
         self._connected_since = None
         self._state = "idle"

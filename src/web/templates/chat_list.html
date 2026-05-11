@@ -29,9 +29,8 @@
         <th class="px-4 py-2">Chat</th>
         <th class="px-4 py-2">Username</th>
         <th class="px-4 py-2">Category</th>
-        <th class="px-4 py-2">Human active</th>
         <th class="px-4 py-2">Last seen</th>
-        <th class="px-4 py-2">Messages</th>
+        <th class="px-4 py-2">Msgs</th>
       </tr>
     </thead>
     <tbody>
@@ -46,9 +45,6 @@
         <td class="px-4 py-2 font-mono">{{ c.username or "—" }}</td>
         <td class="px-4 py-2">
           {% if c.category %}<span class="bg-zinc-100 px-2 py-1 rounded text-xs">{{ c.category }}</span>{% else %}<span class="text-zinc-400">—</span>{% endif %}
-        </td>
-        <td class="px-4 py-2">
-          {% if c.human_active %}<span class="bg-amber-100 text-amber-800 px-2 py-1 rounded text-xs">yes</span>{% else %}<span class="text-zinc-400">—</span>{% endif %}
         </td>
         <td class="px-4 py-2 font-mono text-xs">{{ c.last_seen_at }}</td>
         <td class="px-4 py-2">{{ c.message_count }}</td>

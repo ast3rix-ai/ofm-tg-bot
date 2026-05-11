@@ -57,6 +57,7 @@ def create_app(
 
     # Imported here to avoid circular imports at module load.
     from src.web.routes import accounts as accounts_routes
+    from src.web.routes import alerts as alerts_routes
     from src.web.routes import chats as chats_routes
     from src.web.routes import logs as logs_routes
     from src.web.routes import system as system_routes
@@ -64,6 +65,7 @@ def create_app(
     app.include_router(accounts_routes.router)
     app.include_router(chats_routes.router)
     app.include_router(logs_routes.router)
+    app.include_router(alerts_routes.router)
     app.include_router(system_routes.router)
 
     @app.get("/")

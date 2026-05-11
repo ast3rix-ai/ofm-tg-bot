@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Alerts — ofm-tg-bot{% endblock %}
+{% block content %}
+<div class="flex items-center mb-4 gap-3">
+  <h1 class="text-2xl font-semibold">Operator alerts</h1>
+  <form method="get" action="/alerts" class="ml-auto flex items-center gap-2 text-sm">
+    <label class="flex items-center gap-1">
+      <input type="checkbox" name="only_unack" value="true" {% if only_unack %}checked{% endif %} onchange="this.form.submit()">
+      only un-acknowledged
+    </label>
+    <select name="type" onchange="this.form.submit()" class="border border-zinc-300 rounded px-2 py-1">
+      <option value="">all types</option>
+      {% for t in types %}
+        <option value="{{ t }}" {% if type_filter == t %}selected{% endif %}>{{ t }}</option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
+
+{% if alerts %}
+<table class="w-full bg-white rounded shadow border border-zinc-200 text-sm">
+  <thead class="bg-zinc-100 text-left">
+    <tr>
+      <th class="px-3 py-2">When</th>
+      <th class="px-3 py-2">Type</th>
+      <th class="px-3 py-2">Severity</th>
+      <th class="px-3 py-2">Chat</th>
+      <th class="px-3 py-2">Message</th>
+      <th class="px-3 py-2">Status</th>
+      <th class="px-3 py-2"></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for a in alerts %}
+    <tr class="border-t border-zinc-100 {% if a.severity == 'error' %}bg-red-50{% endif %}">
+      <td class="px-3 py-2 font-mono text-xs">{{ a.created_at }}</td>
+      <td class="px-3 py-2 font-mono text-xs">{{ a.alert_type }}</td>
+      <td class="px-3 py-2">
+        {% if a.severity == 'error' %}<span class="bg-red-700 text-white px-2 py-1 rounded text-xs">error</span>
+        {% elif a.severity == 'warn' %}<span class="bg-amber-600 text-white px-2 py-1 rounded text-xs">warn</span>
+        {% else %}<span class="bg-zinc-500 text-white px-2 py-1 rounded text-xs">info</span>{% endif %}
+      </td>
+      <td class="px-3 py-2">
+        {% if a.chat_id %}<a href="/chats/{{ a.chat_id }}?account_id={{ a.account_id }}" class="text-emerald-700 hover:underline font-mono">{{ a.chat_id }}</a>{% else %}—{% endif %}
+      </td>
+      <td class="px-3 py-2">{{ a.message }}</td>
+      <td class="px-3 py-2">
+        {% if a.acknowledged %}<span class="text-zinc-400 text-xs">ack'd {{ a.acknowledged_at }}</span>{% else %}<span class="text-amber-700 text-xs">open</span>{% endif %}
+      </td>
+      <td class="px-3 py-2 text-right">
+        {% if not a.acknowledged %}
+          <form method="post" action="/alerts/{{ a.id }}/ack">
+            <button class="px-2 py-1 rounded border border-zinc-300 hover:bg-zinc-100 text-xs">Ack</button>
+          </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% if a.payload %}
+    <tr class="border-t border-zinc-50 bg-zinc-50">
+      <td colspan="7" class="px-3 py-1 font-mono text-xs text-zinc-600 truncate">{{ a.payload }}</td>
+    </tr>
+    {% endif %}
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="bg-white rounded shadow border border-zinc-200 p-8 text-center text-zinc-500">
+  No alerts to show.
+</div>
+{% endif %}
+{% endblock %}

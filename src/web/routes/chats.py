@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from src import accounts as accounts_mod
 from src import storage
@@ -63,6 +63,9 @@ async def chat_detail(
     contact = next((c for c in contacts if c["chat_id"] == chat_id), None)
     state = storage.get_contact_state(deps.config.db_path, account_id, chat_id)
     memory = storage.get_contact_memory(deps.config.db_path, account_id, chat_id)
+    runs = storage.get_classifier_runs(
+        deps.config.db_path, account_id=account_id, chat_id=chat_id, limit=10
+    )
 
     return templates.TemplateResponse(
         request,
@@ -74,6 +77,31 @@ async def chat_detail(
             "messages": messages,
             "state": state,
             "memory": memory,
+            "classifier_runs": runs,
             "status": deps.bot_manager.status(),
         },
+    )
+
+
+@router.post("/{chat_id}/bot_enabled")
+async def set_bot_enabled(
+    chat_id: int,
+    account_id: int = Form(...),
+    enabled: int = Form(...),
+    deps: WebDeps = Depends(get_deps),
+) -> RedirectResponse:
+    state = storage.get_contact_state(deps.config.db_path, account_id, chat_id)
+    if state is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot toggle bot — chat has no classifier state yet.",
+        )
+    storage.upsert_contact_state(
+        deps.config.db_path,
+        account_id=account_id,
+        chat_id=chat_id,
+        bot_enabled=1 if int(enabled) else 0,
+    )
+    return RedirectResponse(
+        url=f"/chats/{chat_id}?account_id={account_id}", status_code=303
     )

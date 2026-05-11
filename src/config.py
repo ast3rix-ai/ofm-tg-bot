@@ -31,6 +31,16 @@ class Config:
     log_level: str
     ui_port: int
     ui_auto_activate: bool
+    ollama_host: str
+    llm_model: str | None
+    llm_timeout_seconds: int
+    llm_max_retries: int
+    classifier_confidence_threshold: float
+    bootstrap_history_messages: int
+    bootstrap_history_days: int
+    bootstrap_max_concurrent: int
+    backlog_max_concurrent: int
+    resurface_dormant_days: int
     project_root: Path
     data_dir: Path
     logs_dir: Path
@@ -115,6 +125,40 @@ def load_config(env_file: Path | None = None) -> Config:
         os.environ.get("UI_AUTO_ACTIVATE", ""), default=True
     )
 
+    ollama_host = (
+        os.environ.get("OLLAMA_HOST", "").strip() or "http://127.0.0.1:11434"
+    )
+    llm_model = os.environ.get("LLM_MODEL", "").strip() or None
+
+    def _opt_int(key: str, default: int) -> int:
+        raw = os.environ.get(key, "").strip()
+        if not raw:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            invalid.append(f"{key} (not an integer: {raw!r})")
+            return default
+
+    def _opt_float(key: str, default: float) -> float:
+        raw = os.environ.get(key, "").strip()
+        if not raw:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            invalid.append(f"{key} (not a number: {raw!r})")
+            return default
+
+    llm_timeout_seconds = _opt_int("LLM_TIMEOUT_SECONDS", 60)
+    llm_max_retries = _opt_int("LLM_MAX_RETRIES", 2)
+    classifier_threshold = _opt_float("CLASSIFIER_CONFIDENCE_THRESHOLD", 0.6)
+    bootstrap_msgs = _opt_int("BOOTSTRAP_HISTORY_MESSAGES", 100)
+    bootstrap_days = _opt_int("BOOTSTRAP_HISTORY_DAYS", 30)
+    bootstrap_max_concurrent = _opt_int("BOOTSTRAP_MAX_CONCURRENT", 3)
+    backlog_max_concurrent = _opt_int("BACKLOG_MAX_CONCURRENT", 5)
+    resurface_dormant_days = _opt_int("RESURFACE_DORMANT_DAYS", 14)
+
     if missing or invalid:
         parts: list[str] = []
         if missing:
@@ -140,6 +184,16 @@ def load_config(env_file: Path | None = None) -> Config:
         log_level=log_level,
         ui_port=ui_port,
         ui_auto_activate=ui_auto_activate,
+        ollama_host=ollama_host,
+        llm_model=llm_model,
+        llm_timeout_seconds=llm_timeout_seconds,
+        llm_max_retries=llm_max_retries,
+        classifier_confidence_threshold=classifier_threshold,
+        bootstrap_history_messages=bootstrap_msgs,
+        bootstrap_history_days=bootstrap_days,
+        bootstrap_max_concurrent=bootstrap_max_concurrent,
+        backlog_max_concurrent=backlog_max_concurrent,
+        resurface_dormant_days=resurface_dormant_days,
         project_root=root,
         data_dir=data_dir,
         logs_dir=logs_dir,

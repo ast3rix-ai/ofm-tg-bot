@@ -26,9 +26,10 @@ Each phase is independently shippable. Do not implement features from future pha
 **Note:** Phase 4 must assume the active-account model — the classifier writes rows scoped to `bot_manager.active_account_id`.
 
 ## Phase 4 — Signal detector + classifier
-**Status:** not started
-**Scope:** Local LLM integration (model selection happens here, after research). Rules-first signal detector. Hybrid classifier with confidence thresholds. Categories defined in `docs/CATEGORIES.md`. Populates `contact_state` table on every inbound.
+**Status:** complete
+**Scope:** Local LLM integration via Ollama. Rules-first signal detector. Hybrid classifier with confidence threshold. Migration 004 adds `bot_enabled`, `bootstrap_completed_at`, `last_resurface_at`, and the `classifier_runs` + `operator_alerts` tables. Backlog processor handles initial bootstrap + unread catchup. Categories defined in `docs/CATEGORIES.md`. Populates `contact_state` and `contact_memory` on every classification.
 **Out of scope:** outbound messaging.
+**Note:** Phase 5 must read `bot_enabled` before generating any reply; the toggle is operator-controlled and defaults off for bootstrapped chats.
 
 ## Phase 5 — Response generator
 **Status:** not started

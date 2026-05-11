@@ -39,12 +39,34 @@
 
   <div class="space-y-6">
     <div class="bg-white rounded shadow border border-zinc-200 p-4">
-      <h2 class="font-semibold mb-2 text-sm">State</h2>
+      <div class="flex items-center mb-2">
+        <h2 class="font-semibold text-sm">State</h2>
+        {% if state %}
+        <form method="post" action="/chats/{{ chat_id }}/bot_enabled" class="ml-auto">
+          <input type="hidden" name="account_id" value="{{ account.id }}">
+          <input type="hidden" name="enabled" value="{{ 0 if state.bot_enabled else 1 }}">
+          <button class="text-xs px-2 py-1 rounded {% if state.bot_enabled %}bg-emerald-700 text-white{% else %}bg-zinc-300 text-zinc-800{% endif %}"
+                  title="Toggle whether the bot may reply in this chat (Phase 5+).">
+            bot: {{ 'ON' if state.bot_enabled else 'OFF' }}
+          </button>
+        </form>
+        {% endif %}
+      </div>
       {% if state %}
       <dl class="text-xs grid grid-cols-2 gap-x-3 gap-y-1">
-        <dt class="text-zinc-500">Category</dt><dd>{{ state.category or "—" }}</dd>
+        <dt class="text-zinc-500">Category</dt>
+        <dd>{% if state.category %}<span class="bg-zinc-100 px-2 py-0.5 rounded">{{ state.category }}</span>{% else %}—{% endif %}</dd>
         <dt class="text-zinc-500">Funnel stage</dt><dd>{{ state.funnel_stage or "—" }}</dd>
-        <dt class="text-zinc-500">Confidence</dt><dd>{{ state.last_classifier_confidence or "—" }}</dd>
+        <dt class="text-zinc-500">Confidence</dt>
+        <dd>
+          {% if state.last_classifier_confidence is not none %}
+            {% set c = state.last_classifier_confidence %}
+            <span class="{% if c >= 0.8 %}text-emerald-700{% elif c >= 0.6 %}text-amber-700{% else %}text-red-700{% endif %} font-mono">{{ "%.2f"|format(c) }}</span>
+          {% else %}—{% endif %}
+        </dd>
+        <dt class="text-zinc-500">Last classified</dt><dd class="font-mono">{{ state.last_classified_at or "—" }}</dd>
+        <dt class="text-zinc-500">Bootstrap completed</dt><dd class="font-mono">{{ state.bootstrap_completed_at or "—" }}</dd>
+        <dt class="text-zinc-500">Last resurface</dt><dd class="font-mono">{{ state.last_resurface_at or "—" }}</dd>
         <dt class="text-zinc-500">Human active</dt><dd>{{ state.human_active }}</dd>
         <dt class="text-zinc-500">Updated</dt><dd class="font-mono">{{ state.updated_at }}</dd>
       </dl>
@@ -52,8 +74,40 @@
         <summary class="text-xs text-zinc-500 cursor-pointer">flags</summary>
         <pre class="text-xs bg-zinc-50 p-2 rounded mt-1">{{ state.flags | tojson(indent=2) }}</pre>
       </details>
+      <details class="mt-1">
+        <summary class="text-xs text-zinc-500 cursor-pointer">classifier_metadata</summary>
+        <pre class="text-xs bg-zinc-50 p-2 rounded mt-1">{{ state.classifier_metadata | tojson(indent=2) }}</pre>
+      </details>
       {% else %}
-      <p class="text-zinc-500 text-xs">No state — populated from Phase 4.</p>
+      <p class="text-zinc-500 text-xs">No classifier state yet.</p>
+      {% endif %}
+    </div>
+
+    <div class="bg-white rounded shadow border border-zinc-200 p-4">
+      <h2 class="font-semibold text-sm mb-2">Classifier runs</h2>
+      {% if classifier_runs %}
+      <div class="space-y-2 text-xs">
+        {% for r in classifier_runs %}
+        <details class="border border-zinc-100 rounded p-2">
+          <summary class="cursor-pointer flex flex-wrap items-center gap-2">
+            <span class="font-mono text-zinc-500">{{ r.created_at }}</span>
+            <span class="font-mono">{{ r.triggered_by }}</span>
+            <span>
+              {% if r.category_before %}{{ r.category_before }}{% else %}—{% endif %}
+              →
+              {% if r.category_after %}<span class="bg-zinc-100 px-1 rounded">{{ r.category_after }}</span>{% else %}<span class="text-red-700">parse-fail</span>{% endif %}
+            </span>
+            {% if r.confidence is not none %}<span class="font-mono">{{ "%.2f"|format(r.confidence) }}</span>{% endif %}
+            <span class="text-zinc-400 ml-auto">{{ r.latency_ms or 0 }}ms</span>
+          </summary>
+          {% if r.raw_llm_output %}
+          <pre class="bg-zinc-50 p-2 rounded mt-2 whitespace-pre-wrap break-words">{{ r.raw_llm_output[:2000] }}</pre>
+          {% endif %}
+        </details>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="text-zinc-500 text-xs">No classifier runs yet.</p>
       {% endif %}
     </div>
 

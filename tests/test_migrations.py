@@ -74,7 +74,7 @@ def test_phase1_db_is_upgraded(tmp_path: Path, key: str) -> None:
         },
     )
     versions = _applied_versions(db)
-    assert versions == [1, 2, 3]
+    assert versions == [1, 2, 3, 4]
 
     with sqlite3.connect(str(db)) as conn:
         names = {
@@ -120,9 +120,54 @@ def test_get_applied_migrations_returns_metadata(tmp_path: Path, key: str) -> No
     db = tmp_path / "bot.db"
     storage.init_db(db, migration_context={"encryption_key": key})
     rows = storage.get_applied_migrations(db)
-    assert [r["version"] for r in rows] == [1, 2, 3]
+    assert [r["version"] for r in rows] == [1, 2, 3, 4]
     assert rows[1]["name"] == "contact_state_and_memory"
     assert rows[2]["name"] == "multi_account"
+    assert rows[3]["name"] == "classifier_runs_and_alerts"
+
+
+def test_migration_004_adds_bot_enabled_and_alerts(
+    tmp_path: Path, key: str
+) -> None:
+    db = tmp_path / "bot.db"
+    storage.init_db(db, migration_context={"encryption_key": key})
+    with sqlite3.connect(str(db)) as conn:
+        cs_cols = {r[1] for r in conn.execute("PRAGMA table_info(contact_state)")}
+        assert {
+            "bot_enabled", "bootstrap_completed_at", "last_resurface_at"
+        } <= cs_cols
+
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "classifier_runs" in tables
+        assert "operator_alerts" in tables
+
+
+def test_phase3_db_is_upgraded_to_phase4(tmp_path: Path, key: str) -> None:
+    db = tmp_path / "bot.db"
+    # First apply 1+2+3 (run init_db); then drop just the Phase 4 changes
+    # would be artificial — simulate "Phase 3 stop point" by removing the
+    # version-4 row, the new columns, and the new tables, then re-running.
+    storage.init_db(db, migration_context={"encryption_key": key})
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("DELETE FROM schema_migrations WHERE version >= 4")
+        conn.execute("DROP TABLE classifier_runs")
+        conn.execute("DROP TABLE operator_alerts")
+        # Faking the column drop: SQLite can't drop columns easily; instead,
+        # check that the migration is idempotent: re-running init_db should
+        # restore the tables (it skips already-present columns).
+    storage.init_db(db, migration_context={"encryption_key": key})
+    with sqlite3.connect(str(db)) as conn:
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "classifier_runs" in tables
+    assert "operator_alerts" in tables
 
 
 def test_migration_smoke_schema_present(tmp_path: Path, key: str) -> None:
