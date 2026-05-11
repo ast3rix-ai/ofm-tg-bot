@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+.env
+.python-version
+*.egg-info/
+dist/
+build/
+
+# Project
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+*.session
+*.session-journal
+session.enc
+.session_tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Tooling
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
