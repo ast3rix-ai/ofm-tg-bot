@@ -37,8 +37,8 @@ class Config:
     tg_api_hash: str
     tg_phone: str
     session_encryption_key: str
-    notifier_bot_token: str
-    notifier_chat_id: int
+    notifier_bot_token: str | None
+    notifier_chat_id: int | None
     heartbeat_interval_seconds: int
     log_level: str
     project_root: Path
@@ -54,12 +54,10 @@ _REQUIRED_STRING_KEYS = (
     "TG_API_HASH",
     "TG_PHONE",
     "SESSION_ENCRYPTION_KEY",
-    "NOTIFIER_BOT_TOKEN",
 )
 
 _REQUIRED_INT_KEYS = (
     "TG_API_ID",
-    "NOTIFIER_CHAT_ID",
 )
 
 
@@ -106,6 +104,20 @@ def load_config(env_file: Path | None = None) -> Config:
         except ValueError:
             invalid.append(f"{key} (not an integer: {raw!r})")
 
+    notifier_token_raw = os.environ.get("NOTIFIER_BOT_TOKEN", "").strip()
+    notifier_token: str | None = notifier_token_raw or None
+
+    notifier_chat_raw = os.environ.get("NOTIFIER_CHAT_ID", "").strip()
+    notifier_chat: int | None
+    if not notifier_chat_raw:
+        notifier_chat = None
+    else:
+        try:
+            notifier_chat = int(notifier_chat_raw)
+        except ValueError:
+            invalid.append(f"NOTIFIER_CHAT_ID (not an integer: {notifier_chat_raw!r})")
+            notifier_chat = None
+
     heartbeat_raw = os.environ.get("HEARTBEAT_INTERVAL_SECONDS", "60").strip() or "60"
     try:
         heartbeat = int(heartbeat_raw)
@@ -135,8 +147,8 @@ def load_config(env_file: Path | None = None) -> Config:
         tg_api_hash=string_values["TG_API_HASH"],
         tg_phone=string_values["TG_PHONE"],
         session_encryption_key=string_values["SESSION_ENCRYPTION_KEY"],
-        notifier_bot_token=string_values["NOTIFIER_BOT_TOKEN"],
-        notifier_chat_id=int_values["NOTIFIER_CHAT_ID"],
+        notifier_bot_token=notifier_token,
+        notifier_chat_id=notifier_chat,
         heartbeat_interval_seconds=heartbeat,
         log_level=log_level,
         project_root=root,

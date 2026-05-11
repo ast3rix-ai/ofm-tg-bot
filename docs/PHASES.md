@@ -12,6 +12,7 @@ Each phase is independently shippable. Do not implement features from future pha
 **Scope:** Telethon connection, encrypted session, SQLite schema, structured logging, watchdog, notifier bot, inspection CLI.
 **Out of scope:** any reply logic, classification, LLM, persona, marking read, typing indicators.
 **Acceptance:** see Phase 1 prompt.
+**Note:** Notifier optional as of phase-1.1; populate `.env` to enable.
 
 ## Phase 2 — State store deepening
 **Status:** not started

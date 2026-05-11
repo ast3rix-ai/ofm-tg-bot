@@ -24,12 +24,19 @@ class Notifier:
     do not prevent alerts from reaching the operator.
     """
 
-    def __init__(self, token: str, chat_id: int) -> None:
+    def __init__(self, token: str | None, chat_id: int | None) -> None:
         self._token = token
         self._chat_id = chat_id
-        self._url = f"https://api.telegram.org/bot{token}/sendMessage"
+        self._enabled = token is not None and chat_id is not None
+        self._url = (
+            f"https://api.telegram.org/bot{token}/sendMessage" if self._enabled else ""
+        )
         self._last_sent_at: dict[str, float] = {}
         self._log = logger.bind(module=__name__)
+        if not self._enabled:
+            self._log.warning(
+                "Notifier disabled — operator alerts will not be sent"
+            )
 
     async def alert(
         self,
@@ -45,6 +52,9 @@ class Notifier:
             key: If provided, suppress repeat alerts with the same key within
                 a 60-second window.
         """
+        if not self._enabled:
+            return
+
         if key is not None:
             now = asyncio.get_event_loop().time()
             last = self._last_sent_at.get(key)
