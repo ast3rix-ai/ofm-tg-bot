@@ -3,12 +3,12 @@
 Each phase is independently shippable. Do not implement features from future phases. Mark phase completion by updating the `Status` field below.
 
 ## Phase 0 — Repo scaffolding and docs
-**Status:** in progress
+**Status:** complete
 **Scope:** Directory skeleton, `.gitignore`, `CLAUDE.md`, `docs/`, git init, first push.
 **Acceptance:** Repo exists locally and on GitHub, all docs present.
 
 ## Phase 1 — Foundation, watchdog, logging
-**Status:** not started
+**Status:** complete
 **Scope:** Telethon connection, encrypted session, SQLite schema, structured logging, watchdog, notifier bot, inspection CLI.
 **Out of scope:** any reply logic, classification, LLM, persona, marking read, typing indicators.
 **Acceptance:** see Phase 1 prompt.
