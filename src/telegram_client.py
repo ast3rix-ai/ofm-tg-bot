@@ -141,6 +141,25 @@ class BotClient:
         created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         return {"tg_message_id": int(message.id), "created_at": created_at}
 
+    async def mark_read(self, chat_id: int) -> None:
+        """Send a read receipt for all messages in a chat.
+
+        Used by the humanization layer after a deliberate "reading" delay.
+        """
+        if self._client is None:
+            raise RuntimeError("BotClient.start() has not been called.")
+        await self._client.send_read_acknowledge(chat_id)
+
+    def typing_action(self, chat_id: int) -> Any:
+        """Return a Telethon typing-action async context manager for a chat.
+
+        Entering the context displays the "typing…" indicator; it is held
+        until the context exits.
+        """
+        if self._client is None:
+            raise RuntimeError("BotClient.start() has not been called.")
+        return self._client.action(chat_id, "typing")
+
     async def get_me_summary(self) -> dict[str, Any]:
         """Return a small dict summarizing the authenticated user."""
         if self._client is None:

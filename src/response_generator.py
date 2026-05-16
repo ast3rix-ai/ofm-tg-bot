@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,11 +12,13 @@ from src import storage
 from src.llm.client import LLMClient, LLMError
 from src.llm.prompts import response_prompt
 from src.output_validator import validate_response
-from src.telegram_client import BotClient
+from src.safe_sender import (
+    STATUS_RATE_LIMITED,
+    STATUS_SENT,
+    SafeSender,
+)
 
 _QUOTE_CHARS = "\"'“”‘’"
-
-LockProvider = Callable[[int], asyncio.Lock]
 
 
 @dataclass(frozen=True)
@@ -57,25 +57,25 @@ class ResponseGenerator:
         *,
         db_path: Path,
         llm: LLMClient,
-        telegram_client: BotClient,
+        safe_sender: SafeSender,
         persona_path: Path,
-        get_lock: LockProvider,
         max_retries: int,
         temperature: float,
         max_tokens: int,
         default_bot_enabled_new_chats: int = 1,
         history_window: int = 20,
+        new_chat_age_days: int = 7,
     ) -> None:
         self._db_path = db_path
         self._llm = llm
-        self._client = telegram_client
+        self._safe_sender = safe_sender
         self._persona_path = persona_path
-        self._get_lock = get_lock
         self._max_retries = max(0, int(max_retries))
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._default_bot_enabled = default_bot_enabled_new_chats
         self._history_window = history_window
+        self._new_chat_age_days = new_chat_age_days
         self._log = logger.bind(module=__name__)
 
         self._persona_text: str | None = None
@@ -285,75 +285,95 @@ class ResponseGenerator:
                 latency_ms=int((time.monotonic() - start) * 1000),
             )
 
-        # --- Send under the per-chat lock ---
-        lock = self._get_lock(chat_id)
-        async with lock:
-            try:
-                sent = await self._client.send_message(chat_id, final_text)
-            except Exception as exc:  # noqa: BLE001
-                self._log.error(
-                    "Response send failed", chat_id=chat_id, error=str(exc)
-                )
-                return self._record_failed(
-                    account_id=account_id,
-                    chat_id=chat_id,
-                    triggering_message_id=triggering_message_id,
-                    persona_version=persona_version,
-                    raw_attempts=raw_attempts,
-                    attempts=attempts,
-                    start=start,
-                    reason=f"send failed: {exc}",
-                )
+        # --- Insert the audit row, then hand off to SafeSender ---
+        # The run row is created before sending so SafeSender can attach
+        # rate-limit/flood state to it; its outcome is finalized afterwards.
+        run_id = storage.insert_response_run(
+            self._db_path,
+            account_id=account_id,
+            chat_id=chat_id,
+            triggered_by_message_id=triggering_message_id,
+            persona_version=persona_version,
+            attempts=attempts,
+            outcome="pending",
+            gate_reason=None,
+            raw_attempts=raw_attempts,
+            final_text=final_text,
+            latency_ms=int((time.monotonic() - start) * 1000),
+        )
 
-            tg_message_id = int(sent["tg_message_id"])
+        is_new_chat = self._is_new_chat(account_id, chat_id)
+        try:
+            send_result = await self._safe_sender.send(
+                chat_id, final_text, run_id, is_new_chat
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.error(
+                "Response send failed", chat_id=chat_id, error=str(exc)
+            )
             latency_ms = int((time.monotonic() - start) * 1000)
-            run_id = storage.insert_response_run(
-                self._db_path,
-                account_id=account_id,
-                chat_id=chat_id,
-                triggered_by_message_id=triggering_message_id,
-                persona_version=persona_version,
-                attempts=attempts,
-                outcome="sent",
+            storage.update_response_run(
+                self._db_path, run_id, outcome="failed", latency_ms=latency_ms
+            )
+            return ResponseResult(
+                outcome="failed",
                 gate_reason=None,
-                raw_attempts=raw_attempts,
-                final_text=final_text,
+                attempts=attempts,
+                final_text=None,
+                response_run_id=run_id,
+                sent_tg_message_id=None,
                 latency_ms=latency_ms,
             )
-            storage.insert_message(
-                self._db_path,
-                account_id=account_id,
-                chat_id=chat_id,
-                tg_message_id=tg_message_id,
-                direction="out",
-                sender_id=0,
-                text=final_text,
-                media_type=None,
-                raw_json=f'{{"bot_sent": true, "response_run_id": {run_id}}}',
-            )
-            storage.insert_bot_sent_message(
-                self._db_path,
-                account_id=account_id,
-                chat_id=chat_id,
-                tg_message_id=tg_message_id,
-                response_run_id=run_id,
-            )
 
+        latency_ms = int((time.monotonic() - start) * 1000)
+        if send_result.status == STATUS_SENT:
+            outcome = "sent"
+            gate_reason = None
+        elif send_result.status == STATUS_RATE_LIMITED:
+            outcome = "gated"
+            gate_reason = send_result.rate_limit_state
+        else:  # STATUS_SEND_FAILED
+            outcome = "failed"
+            gate_reason = None
+        storage.update_response_run(
+            self._db_path,
+            run_id,
+            outcome=outcome,
+            gate_reason=gate_reason,
+            latency_ms=latency_ms,
+        )
         self._log.info(
-            "Response sent",
+            "Response dispatched",
             chat_id=chat_id,
             attempts=attempts,
-            tg_message_id=tg_message_id,
+            outcome=outcome,
+            chunks_sent=send_result.chunks_sent,
         )
         return ResponseResult(
-            outcome="sent",
-            gate_reason=None,
+            outcome=outcome,
+            gate_reason=gate_reason,
             attempts=attempts,
             final_text=final_text,
             response_run_id=run_id,
-            sent_tg_message_id=tg_message_id,
+            sent_tg_message_id=None,
             latency_ms=latency_ms,
         )
+
+    def _is_new_chat(self, account_id: int, chat_id: int) -> bool:
+        """True if the contact's first message is within `new_chat_age_days`."""
+        first_seen = storage.get_contact_first_seen_at(
+            self._db_path, account_id, chat_id
+        )
+        if first_seen is None:
+            return True
+        try:
+            parsed = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        age_days = (datetime.now(UTC) - parsed).total_seconds() / 86400.0
+        return age_days < self._new_chat_age_days
 
     # ---------- helpers ----------
 

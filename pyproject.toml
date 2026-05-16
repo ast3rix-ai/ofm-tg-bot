@@ -60,6 +60,10 @@ ignore_missing_imports = true
 module = "src.event_handler"
 disallow_untyped_decorators = false
 
+[[tool.mypy.overrides]]
+module = "src.spambot_monitor"
+disallow_untyped_decorators = false
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

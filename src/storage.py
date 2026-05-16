@@ -734,18 +734,34 @@ def insert_bot_sent_message(
     chat_id: int,
     tg_message_id: int,
     response_run_id: int | None,
+    split_index: int = 0,
+    total_chunks: int = 1,
+    humanizer_metadata: dict[str, Any] | None = None,
 ) -> None:
-    """Tag an outbound message as bot-sent. Idempotent on the unique key."""
+    """Tag an outbound message as bot-sent. Idempotent on the unique key.
+
+    `split_index` / `total_chunks` describe a message split into multiple
+    Telegram sends by the humanizer; `humanizer_metadata` is a JSON blob of
+    timing/typo details for that chunk.
+    """
     now = _utcnow_iso()
+    metadata_json = (
+        json.dumps(humanizer_metadata, default=str, ensure_ascii=False)
+        if humanizer_metadata is not None else None
+    )
     with _connect(db_path) as conn:
         try:
             conn.execute(
                 """
                 INSERT INTO bot_sent_messages (
-                    account_id, chat_id, tg_message_id, response_run_id, created_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    account_id, chat_id, tg_message_id, response_run_id,
+                    split_index, total_chunks, humanizer_metadata, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (account_id, chat_id, tg_message_id, response_run_id, now),
+                (
+                    account_id, chat_id, tg_message_id, response_run_id,
+                    split_index, total_chunks, metadata_json, now,
+                ),
             )
         except sqlite3.IntegrityError:
             pass
@@ -810,3 +826,219 @@ def count_response_runs_by_outcome(
             (account_id, outcome, since_iso),
         ).fetchone()
     return int(row[0])
+
+
+_RESPONSE_RUN_UPDATABLE: frozenset[str] = frozenset({
+    "outcome",
+    "gate_reason",
+    "final_text",
+    "latency_ms",
+    "rate_limit_state",
+    "flood_wait_seconds",
+    "circuit_breaker_tripped_at",
+})
+
+
+def update_response_run(db_path: Path, run_id: int, **fields: Any) -> None:
+    """Partially update a `response_runs` row. Only provided columns change.
+
+    Raises:
+        ValueError: If `fields` contains a column outside the updatable set.
+    """
+    unknown = set(fields) - _RESPONSE_RUN_UPDATABLE
+    if unknown:
+        raise ValueError(
+            f"Unknown response_runs fields: {sorted(unknown)}. "
+            f"Allowed: {sorted(_RESPONSE_RUN_UPDATABLE)}"
+        )
+    if not fields:
+        return
+    assignments = ", ".join(f"{k} = ?" for k in fields)
+    values: list[Any] = [*fields.values(), run_id]
+    with _connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE response_runs SET {assignments} WHERE id = ?", values
+        )
+
+
+def get_contact_first_seen_at(
+    db_path: Path, account_id: int, chat_id: int
+) -> str | None:
+    """Return the `first_seen_at` of a contact, or None if it does not exist."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT first_seen_at FROM contacts"
+            " WHERE account_id = ? AND chat_id = ?",
+            (account_id, chat_id),
+        ).fetchone()
+    return None if row is None else str(row[0])
+
+
+# ---------- daily send counters ----------
+
+
+def get_daily_send_count(
+    db_path: Path, *, account_id: int, chat_id: int, utc_day: str
+) -> int:
+    """Return today's per-chat outbound count, 0 if no row yet."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT count FROM daily_send_counters"
+            " WHERE account_id = ? AND chat_id = ? AND utc_day = ?",
+            (account_id, chat_id, utc_day),
+        ).fetchone()
+    return 0 if row is None else int(row[0])
+
+
+def increment_daily_send_count(
+    db_path: Path, *, account_id: int, chat_id: int, utc_day: str
+) -> int:
+    """Increment and return today's per-chat outbound count."""
+    now = _utcnow_iso()
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO daily_send_counters (
+                account_id, chat_id, utc_day, count, updated_at
+            ) VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT(account_id, chat_id, utc_day) DO UPDATE SET
+                count = count + 1,
+                updated_at = excluded.updated_at
+            """,
+            (account_id, chat_id, utc_day, now),
+        )
+        row = conn.execute(
+            "SELECT count FROM daily_send_counters"
+            " WHERE account_id = ? AND chat_id = ? AND utc_day = ?",
+            (account_id, chat_id, utc_day),
+        ).fetchone()
+    return int(row[0])
+
+
+def get_daily_global_count(
+    db_path: Path, *, account_id: int, utc_day: str
+) -> int:
+    """Return today's account-wide outbound count, 0 if no row yet."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT count FROM daily_global_counters"
+            " WHERE account_id = ? AND utc_day = ?",
+            (account_id, utc_day),
+        ).fetchone()
+    return 0 if row is None else int(row[0])
+
+
+def increment_daily_global_count(
+    db_path: Path, *, account_id: int, utc_day: str
+) -> int:
+    """Increment and return today's account-wide outbound count."""
+    now = _utcnow_iso()
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO daily_global_counters (
+                account_id, utc_day, count, updated_at
+            ) VALUES (?, ?, 1, ?)
+            ON CONFLICT(account_id, utc_day) DO UPDATE SET
+                count = count + 1,
+                updated_at = excluded.updated_at
+            """,
+            (account_id, utc_day, now),
+        )
+        row = conn.execute(
+            "SELECT count FROM daily_global_counters"
+            " WHERE account_id = ? AND utc_day = ?",
+            (account_id, utc_day),
+        ).fetchone()
+    return int(row[0])
+
+
+# ---------- circuit breaker audit ----------
+
+
+def insert_circuit_breaker_event(
+    db_path: Path,
+    *,
+    account_id: int,
+    event: str,
+    reason: str | None,
+    duration_seconds: float | None,
+) -> int:
+    """Append a circuit-breaker transition row. Returns the new row id."""
+    now = _utcnow_iso()
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO circuit_breaker_events (
+                account_id, event, reason, duration_seconds, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (account_id, event, reason, duration_seconds, now),
+        )
+    return int(cur.lastrowid or 0)
+
+
+def get_recent_circuit_breaker_events(
+    db_path: Path, *, account_id: int, limit: int = 20
+) -> list[dict[str, Any]]:
+    """Return the most recent circuit-breaker transitions, newest first."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM circuit_breaker_events"
+            " WHERE account_id = ? ORDER BY id DESC LIMIT ?",
+            (account_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------- account restrictions ----------
+
+
+def insert_account_restriction(
+    db_path: Path,
+    *,
+    account_id: int,
+    restriction_type: str,
+    raw_body: str | None,
+) -> int:
+    """Record a SpamBot-detected account restriction. Returns the new row id."""
+    now = _utcnow_iso()
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO account_restrictions (
+                account_id, restriction_type, raw_body, detected_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (account_id, restriction_type, raw_body, now),
+        )
+    return int(cur.lastrowid or 0)
+
+
+def get_active_account_restriction(
+    db_path: Path, account_id: int
+) -> dict[str, Any] | None:
+    """Return the most recent un-cleared restriction for the account, or None."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM account_restrictions"
+            " WHERE account_id = ? AND cleared_at IS NULL"
+            " ORDER BY id DESC LIMIT 1",
+            (account_id,),
+        ).fetchone()
+    return None if row is None else dict(row)
+
+
+def clear_account_restrictions(db_path: Path, account_id: int) -> int:
+    """Mark all un-cleared restrictions for the account as cleared.
+
+    Returns the number of rows updated.
+    """
+    now = _utcnow_iso()
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE account_restrictions SET cleared_at = ?"
+            " WHERE account_id = ? AND cleared_at IS NULL",
+            (now, account_id),
+        )
+    return int(cur.rowcount or 0)
