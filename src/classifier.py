@@ -343,7 +343,9 @@ class Classifier:
             chat_id=chat_id,
             category=parsed["category"],
             funnel_stage=parsed["funnel_stage_inferred"] or None,
-            flags=parsed["flags"],
+            # Bootstrap ingests history — an operator takeover cannot have
+            # happened yet, so `human_active` is always false here.
+            flags={**parsed["flags"], "human_active": False},
             last_classified_at=now,
             last_classifier_confidence=parsed["confidence"],
             classifier_metadata={
@@ -412,9 +414,14 @@ class Classifier:
         input_message_count: int,
     ) -> None:
         now = _utcnow_iso()
+        # `human_active` marks an operator manual-takeover — it is NOT a
+        # judgement the classifier LLM may make. Preserve the prior value;
+        # the model only gets to control `timewaster`.
+        flags_out = dict(result.flags)
+        flags_out["human_active"] = bool(flags_before.get("human_active", False))
         state_fields: dict[str, Any] = {
             "category": result.category,
-            "flags": result.flags,
+            "flags": flags_out,
             "last_classified_at": now,
             "last_classifier_confidence": result.confidence,
             "classifier_metadata": {
@@ -429,8 +436,11 @@ class Classifier:
             self._db_path, account_id, chat_id
         )
         if existing_state is None:
-            # No prior row — chat seen live from message 1; bot is enabled by default.
+            # No prior row — chat seen live from message 1. Enable the bot and
+            # stamp `bootstrap_completed_at` so the event handler does not
+            # mistake later messages for mid-bootstrap traffic and skip them.
             state_fields["bot_enabled"] = 1
+            state_fields["bootstrap_completed_at"] = now
 
         storage.upsert_contact_state(
             self._db_path,
