@@ -284,3 +284,78 @@ async def test_parser_rejects_bad_outputs(db: Path, account_id: int, bad: str) -
     from src.classifier import _parse_classifier_output
     with pytest.raises(ValueError):
         _parse_classifier_output(bad)
+
+
+async def test_classifier_ignores_llm_human_active_flag(
+    db: Path, account_id: int
+) -> None:
+    """The classifier must never let the LLM assert an operator takeover.
+
+    `human_active` is operator-controlled state; a hallucinated `true` from
+    the model would otherwise permanently gate the response generator.
+    """
+    _seed_chat(db, account_id)
+    storage.insert_message(
+        db, account_id=account_id, chat_id=1, tg_message_id=1, direction="in",
+        sender_id=1, text="hey how much for a custom", media_type=None,
+        raw_json="{}",
+    )
+    llm = _llm_returning({
+        "category": "hot",
+        "confidence": 0.9,
+        "flags": {"timewaster": False, "human_active": True},
+        "reasoning": "pricing question",
+        "extracted_facts": {},
+        "threat_detected": False,
+        "threat_details": "",
+    })
+    clf = Classifier(
+        db_path=db, llm=llm, notifier=Notifier(token=None, chat_id=None),
+        confidence_threshold=0.6,
+    )
+    await clf.classify_new_message(
+        account_id=account_id, chat_id=1,
+        new_message={"text": "hey how much for a custom"},
+        signal_result=_signals(),
+    )
+    state = storage.get_contact_state(db, account_id, 1)
+    assert state is not None
+    assert state["flags"]["human_active"] is False
+
+
+async def test_live_classified_chat_is_marked_established(
+    db: Path, account_id: int
+) -> None:
+    """A chat first seen live must be enabled and stamped bootstrap-complete.
+
+    Without the stamp, the event handler treats later messages as
+    mid-bootstrap traffic and silently skips them.
+    """
+    _seed_chat(db, account_id)
+    storage.insert_message(
+        db, account_id=account_id, chat_id=1, tg_message_id=1, direction="in",
+        sender_id=1, text="hey how much for a custom", media_type=None,
+        raw_json="{}",
+    )
+    llm = _llm_returning({
+        "category": "hot",
+        "confidence": 0.9,
+        "flags": {"timewaster": False, "human_active": False},
+        "reasoning": "pricing question",
+        "extracted_facts": {},
+        "threat_detected": False,
+        "threat_details": "",
+    })
+    clf = Classifier(
+        db_path=db, llm=llm, notifier=Notifier(token=None, chat_id=None),
+        confidence_threshold=0.6,
+    )
+    await clf.classify_new_message(
+        account_id=account_id, chat_id=1,
+        new_message={"text": "hey how much for a custom"},
+        signal_result=_signals(),
+    )
+    state = storage.get_contact_state(db, account_id, 1)
+    assert state is not None
+    assert state["bot_enabled"] == 1
+    assert state["bootstrap_completed_at"] is not None
