@@ -211,3 +211,23 @@ If you lose the encryption key, the encrypted columns are unrecoverable: every a
 - `ConfigError: missing ...` — fill the missing keys in `.env`. `.env.example` lists what's required.
 - `Failed to decrypt session — wrong key or corrupt file.` — the `SESSION_ENCRYPTION_KEY` doesn't match the one used to write `data/session.enc`. If you have no backup of the old key, delete `data/session.enc` and re-auth.
 - Notifier alerts not arriving — confirm the `NOTIFIER_BOT_TOKEN` is the right bot, `NOTIFIER_CHAT_ID` is the numeric chat ID (not the username), and that you have sent at least one message to the bot from that chat (Telegram bots cannot DM users who have never messaged them).
+
+## Rate limiting and the circuit breaker (Phase 5.5)
+
+All outbound sends pass through `SafeSender`, which gates on `RateLimiter`:
+
+- **Token buckets** — per-chat (0.5/s, burst 3) and account-global (1/s, burst 10).
+- **Daily caps** — 40/chat, 200/account, 10/day for chats < 7 days old. Tunable via `RATE_LIMIT_*` in `.env`. Counters are keyed by UTC day and reset at midnight UTC.
+- **Circuit breaker** — opens automatically on: two `FloodWaitError`s within 5 minutes (opens for `max(wait) × 4`), any `PeerFloodError` (opens 6h), or a @SpamBot restriction (opens until manually reset). After the timer it goes half-open and the next send is a probe — success closes it, failure re-opens with doubled duration.
+
+While the breaker is open, every send is gated and the gated `response_runs` row records the reason in `rate_limit_state`.
+
+## Recovering from a restriction / open breaker
+
+A @SpamBot restriction (detected by `SpamBotMonitor`) inserts an `account_restrictions` row and trips the breaker open indefinitely. The un-cleared restriction row is the persistent kill-switch — it survives restarts, so the bot will not silently resume.
+
+To recover after confirming the account is healthy (check @SpamBot directly — it should say "no limits are currently applied"):
+
+- Send `/breaker_reset` to the userbot from an operator account (`OPERATOR_USER_IDS`). This closes the breaker and clears all active restriction rows.
+
+Inspect breaker history in the `circuit_breaker_events` table and current state via `GET /system/status` (`rate_limiting` section).

@@ -5,8 +5,10 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 from src import storage
+from src.config import RateLimitConfig
 from src.event_handler import EventHandler
 from src.notifier import Notifier
+from src.rate_limiter import BreakerState, RateLimiter
 
 
 class _FakeSender:
@@ -121,4 +123,64 @@ async def test_non_operator_reset_is_classified(db: Path, account_id: int) -> No
     classifier.classify_new_message.assert_awaited_once()
     response_generator.generate.assert_awaited_once()
     # No reset confirmation leaked to a non-operator.
+    client.send_message.assert_not_called()
+
+
+async def test_operator_breaker_reset_closes_breaker(
+    db: Path, account_id: int
+) -> None:
+    chat_id = 3
+    client = _telegram()
+    classifier = AsyncMock()
+    limiter = RateLimiter(db, account_id, RateLimitConfig())
+    await limiter.record_peer_flood()
+    assert limiter.breaker_state is BreakerState.OPEN
+
+    handler = EventHandler(
+        client=client,
+        db_path=db,
+        notifier=Notifier(token=None, chat_id=None),
+        account_id=account_id,
+        classifier=classifier,
+        operator_user_ids=frozenset({999}),
+        rate_limiter=limiter,
+    )
+    handler._accept_live = True
+
+    event = _FakeEvent(chat_id, _FakeSender(999), _FakeMessage(30, "/breaker_reset"))
+    await handler._handle(event)
+
+    assert limiter.breaker_state is BreakerState.CLOSED
+    classifier.classify_new_message.assert_not_called()
+    client.send_message.assert_awaited_once()
+    assert client.send_message.await_args.args[1] == "breaker reset ✓"
+
+
+async def test_non_operator_breaker_reset_is_classified(
+    db: Path, account_id: int
+) -> None:
+    chat_id = 4
+    client = _telegram()
+    classifier = AsyncMock()
+    response_generator = AsyncMock()
+    limiter = RateLimiter(db, account_id, RateLimitConfig())
+    handler = EventHandler(
+        client=client,
+        db_path=db,
+        notifier=Notifier(token=None, chat_id=None),
+        account_id=account_id,
+        classifier=classifier,
+        operator_user_ids=frozenset({999}),
+        rate_limiter=limiter,
+    )
+    handler.set_response_generator(response_generator)
+    handler._accept_live = True
+
+    # Sender 111 is not an operator — treated as ordinary text.
+    event = _FakeEvent(
+        chat_id, _FakeSender(111), _FakeMessage(40, "/breaker_reset")
+    )
+    await handler._handle(event)
+
+    classifier.classify_new_message.assert_awaited_once()
     client.send_message.assert_not_called()

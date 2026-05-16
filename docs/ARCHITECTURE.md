@@ -154,7 +154,17 @@ Three layers, all per-contact:
 
 ## Account safety posture
 
-- Outbound rate cap (Phase 5+): max N messages per hour across all chats, configurable.
-- No simultaneous typing in many chats — staggered.
-- No replies between configured "sleep hours" unless the chat is flagged hot.
-- Session encrypted at rest; multi-account support designed so each account = isolated session file + isolated DB row.
+- Outbound rate limiting (Phase 5.5): all sends pass through `SafeSender` →
+  `RateLimiter` — three-layer token buckets (per-chat + global), daily caps
+  (per-chat / global / new-chat sub-cap), and a circuit breaker that opens on
+  flood errors, `PeerFloodError`, or @SpamBot restrictions.
+- `SpamBotMonitor` watches @SpamBot; a detected restriction trips the breaker
+  open until an operator runs `/breaker_reset`. The persisted
+  `account_restrictions` row is the kill-switch and survives restarts.
+- Humanization (Phase 6): `Humanizer` adds read-receipt delays, typing
+  indicators sized to message length, message splitting, varied inter-message
+  cadence, and occasional realistic typos.
+- No replies between configured "sleep hours" unless the chat is flagged hot
+  (Phase 8).
+- Session encrypted at rest; multi-account support designed so each account =
+  isolated session file + isolated DB row.

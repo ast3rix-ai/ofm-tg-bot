@@ -36,9 +36,14 @@ Each phase is independently shippable. Do not implement features from future pha
 **Scope:** LLM-driven reply generation. Minimal hardcoded persona (`personas/default/persona.md`) loaded from disk with mtime-based hot-reload. Rolling window + distilled memory feeding the prompt. Output validation with AI-tell blacklist and re-roll. Atomic sends via Telegram client under a per-chat lock. Reply gating on `bot_enabled` / `category != 'paid'` / `human_active`. Operator `/reset` command. Outbound message tagging (`bot_sent_messages`) as Phase 7 groundwork. Migration 005 adds `response_runs` + `bot_sent_messages`.
 **Out of scope:** humanization (sends are immediate and atomic in this phase — humanization is Phase 6); real persona depth (Phase 8); operator-takeover auto-detection and routing rules (Phase 7).
 
+## Phase 5.5 — Rate limiting + flood protection
+**Status:** complete
+**Scope:** `SafeSender` orchestrates the outbound path. `RateLimiter` adds three-layer token buckets (per-chat, global), daily caps (per-chat, global, new-chat sub-cap), and a circuit breaker (flood-double, peer-flood, account-restriction, half-open probe). `SpamBotMonitor` listens for @SpamBot and trips the breaker on a restriction. Migration 006 adds `daily_send_counters`, `daily_global_counters`, `circuit_breaker_events`, `account_restrictions`, plus rate-limit columns on `response_runs` and humanizer columns on `bot_sent_messages`. Operator `/breaker_reset` command.
+
 ## Phase 6 — Humanization layer
-**Status:** not started
-**Scope:** Message splitting, inter-message delays, typing indicators, response latency distributions by category and time of day, occasional realistic typos, read-receipt patterns. Wraps the Phase 5 atomic `telegram_client.send_message`.
+**Status:** complete
+**Scope:** `Humanizer` adds message splitting, inter-message delays, typing indicators sized to message length, occasional realistic typos with optional `*corrections`, and read-receipt delays. Wired through `SafeSender` between the rate limiter and the Telegram client. All randomness flows through an injected `random.Random` for deterministic testing.
+**Out of scope:** latency distributions by time-of-day / sleep hours — deferred to Phase 8 tuning.
 
 ## Phase 7 — Routing rules + handoff + control chat
 **Status:** not started

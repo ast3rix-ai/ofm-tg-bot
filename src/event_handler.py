@@ -17,7 +17,9 @@ from src.telegram_client import BotClient
 
 if TYPE_CHECKING:
     from src.classifier import Classifier
+    from src.rate_limiter import RateLimiter
     from src.response_generator import ResponseGenerator
+    from src.spambot_monitor import SpamBotMonitor
 
 _TEXT_PREVIEW_CHARS = 80
 
@@ -59,6 +61,8 @@ class EventHandler:
         classifier: Classifier | None = None,
         resurface_threshold_days: int = 14,
         operator_user_ids: frozenset[int] = frozenset(),
+        rate_limiter: RateLimiter | None = None,
+        spambot_monitor: SpamBotMonitor | None = None,
     ) -> None:
         self._client = client
         self._db_path = db_path
@@ -67,6 +71,8 @@ class EventHandler:
         self._classifier = classifier
         self._resurface_days = resurface_threshold_days
         self._operator_user_ids = operator_user_ids
+        self._rate_limiter = rate_limiter
+        self._spambot_monitor = spambot_monitor
         self._response_generator: ResponseGenerator | None = None
         self._log = logger.bind(module=__name__, account_id=account_id)
         self._chat_locks: dict[int, asyncio.Lock] = {}
@@ -92,6 +98,9 @@ class EventHandler:
         @tg.on(events.NewMessage(incoming=True))
         async def _on_new_message(event: events.NewMessage.Event) -> None:
             await self._handle(event)
+
+        if self._spambot_monitor is not None:
+            self._spambot_monitor.register(tg)
 
         self._log.info("Event handler registered")
 
@@ -172,15 +181,15 @@ class EventHandler:
             if not inserted:
                 return
 
-            # Operator `/reset` command — runs before classification. Only
-            # honoured from allow-listed operator accounts; from anyone else
-            # `/reset` is treated as ordinary text (we do not leak its
-            # existence).
-            if (
-                text is not None
-                and text.strip().lower().startswith("/reset")
-                and sender_id in self._operator_user_ids
-            ):
+            # Operator commands — run before classification, honoured only
+            # from allow-listed operator accounts; from anyone else they are
+            # treated as ordinary text (we do not leak their existence).
+            is_operator = sender_id in self._operator_user_ids
+            command = text.strip().lower() if text is not None else ""
+            if is_operator and command.startswith("/breaker_reset"):
+                await self._handle_breaker_reset(chat_id)
+                return
+            if is_operator and command.startswith("/reset"):
                 await self._handle_reset(chat_id)
                 return
 
@@ -264,6 +273,50 @@ class EventHandler:
                 error=str(exc),
             )
         self._log.info("Operator /reset handled", chat_id=chat_id)
+
+    async def _handle_breaker_reset(self, chat_id: int) -> None:
+        """Close the circuit breaker on operator command and confirm in-chat."""
+        if self._rate_limiter is None:
+            self._log.warning(
+                "Operator /breaker_reset received but no rate limiter wired",
+                chat_id=chat_id,
+            )
+            return
+        await commands.handle_breaker_reset(
+            db_path=self._db_path,
+            account_id=self._account_id,
+            rate_limiter=self._rate_limiter,
+        )
+        confirmation = "breaker reset ✓"
+        try:
+            async with self.get_lock(chat_id):
+                sent = await self._client.send_message(chat_id, confirmation)
+                tg_message_id = int(sent["tg_message_id"])
+                storage.insert_message(
+                    self._db_path,
+                    account_id=self._account_id,
+                    chat_id=chat_id,
+                    tg_message_id=tg_message_id,
+                    direction="out",
+                    sender_id=0,
+                    text=confirmation,
+                    media_type=None,
+                    raw_json='{"operator_command": "breaker_reset"}',
+                )
+                storage.insert_bot_sent_message(
+                    self._db_path,
+                    account_id=self._account_id,
+                    chat_id=chat_id,
+                    tg_message_id=tg_message_id,
+                    response_run_id=None,
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(
+                "Breaker reset confirmation send failed",
+                chat_id=chat_id,
+                error=str(exc),
+            )
+        self._log.info("Operator /breaker_reset handled", chat_id=chat_id)
 
     async def _classify_persisted(self, payload: dict[str, Any]) -> None:
         assert self._classifier is not None

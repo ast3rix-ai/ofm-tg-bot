@@ -74,7 +74,7 @@ def test_phase1_db_is_upgraded(tmp_path: Path, key: str) -> None:
         },
     )
     versions = _applied_versions(db)
-    assert versions == [1, 2, 3, 4, 5]
+    assert versions == [1, 2, 3, 4, 5, 6]
 
     with sqlite3.connect(str(db)) as conn:
         names = {
@@ -120,11 +120,12 @@ def test_get_applied_migrations_returns_metadata(tmp_path: Path, key: str) -> No
     db = tmp_path / "bot.db"
     storage.init_db(db, migration_context={"encryption_key": key})
     rows = storage.get_applied_migrations(db)
-    assert [r["version"] for r in rows] == [1, 2, 3, 4, 5]
+    assert [r["version"] for r in rows] == [1, 2, 3, 4, 5, 6]
     assert rows[1]["name"] == "contact_state_and_memory"
     assert rows[2]["name"] == "multi_account"
     assert rows[3]["name"] == "classifier_runs_and_alerts"
     assert rows[4]["name"] == "response_runs_and_bot_sent"
+    assert rows[5]["name"] == "rate_limit_and_circuit_breaker"
 
 
 def test_migration_004_adds_bot_enabled_and_alerts(
@@ -217,7 +218,74 @@ def test_phase4_db_is_upgraded_to_phase5(tmp_path: Path, key: str) -> None:
         }
     assert "bot_sent_messages" in tables
     assert "response_runs" in tables
-    assert _applied_versions(db) == [1, 2, 3, 4, 5]
+    assert _applied_versions(db) == [1, 2, 3, 4, 5, 6]
+
+
+def test_migration_006_creates_rate_limit_tables(
+    tmp_path: Path, key: str
+) -> None:
+    db = tmp_path / "bot.db"
+    storage.init_db(db, migration_context={"encryption_key": key})
+    with sqlite3.connect(str(db)) as conn:
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert {
+            "daily_send_counters", "daily_global_counters",
+            "circuit_breaker_events", "account_restrictions",
+        } <= tables
+
+        rr_cols = {r[1] for r in conn.execute("PRAGMA table_info(response_runs)")}
+        assert {
+            "rate_limit_state", "flood_wait_seconds",
+            "circuit_breaker_tripped_at",
+        } <= rr_cols
+
+        bsm_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(bot_sent_messages)")
+        }
+        assert {
+            "split_index", "total_chunks", "humanizer_metadata",
+        } <= bsm_cols
+
+
+def test_phase5_db_is_upgraded_to_phase6(tmp_path: Path, key: str) -> None:
+    db = tmp_path / "bot.db"
+    storage.init_db(db, migration_context={"encryption_key": key})
+    # Simulate a "Phase 5 stop point": drop the version-6 row and tables,
+    # then confirm a re-run of init_db restores them idempotently.
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("DELETE FROM schema_migrations WHERE version >= 6")
+        conn.execute("DROP TABLE daily_send_counters")
+        conn.execute("DROP TABLE daily_global_counters")
+        conn.execute("DROP TABLE circuit_breaker_events")
+        conn.execute("DROP TABLE account_restrictions")
+    storage.init_db(db, migration_context={"encryption_key": key})
+    with sqlite3.connect(str(db)) as conn:
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert {
+        "daily_send_counters", "daily_global_counters",
+        "circuit_breaker_events", "account_restrictions",
+    } <= tables
+    assert _applied_versions(db) == [1, 2, 3, 4, 5, 6]
+
+
+def test_migration_006_is_idempotent_on_columns(
+    tmp_path: Path, key: str
+) -> None:
+    # Re-running init_db must not fail on the already-present ADD COLUMNs.
+    db = tmp_path / "bot.db"
+    storage.init_db(db, migration_context={"encryption_key": key})
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("DELETE FROM schema_migrations WHERE version >= 6")
+    storage.init_db(db, migration_context={"encryption_key": key})
+    assert _applied_versions(db) == [1, 2, 3, 4, 5, 6]
 
 
 def test_migration_smoke_schema_present(tmp_path: Path, key: str) -> None:

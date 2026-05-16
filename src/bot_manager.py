@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,10 +13,15 @@ from src import accounts, storage
 from src.accounts import AccountsError
 from src.backlog import BacklogProcessor
 from src.classifier import Classifier
+from src.config import HumanizationConfig, RateLimitConfig
 from src.event_handler import EventHandler
+from src.humanizer import Humanizer
 from src.llm.client import LLMClient
 from src.notifier import Notifier
+from src.rate_limiter import RateLimiter
 from src.response_generator import ResponseGenerator
+from src.safe_sender import SafeSender
+from src.spambot_monitor import SpamBotMonitor
 from src.telegram_client import BotClient, auth_provider_from_queue
 from src.watchdog import Watchdog
 
@@ -63,6 +69,8 @@ class BotManager:
         response_persona_path: Path | None = None,
         operator_user_ids: frozenset[int] = frozenset(),
         default_bot_enabled_new_chats: int = 1,
+        rate_limits: RateLimitConfig | None = None,
+        humanization: HumanizationConfig | None = None,
     ) -> None:
         self._db_path = db_path
         self._encryption_key = encryption_key
@@ -84,6 +92,8 @@ class BotManager:
         )
         self._operator_user_ids = operator_user_ids
         self._default_bot_enabled_new_chats = default_bot_enabled_new_chats
+        self._rate_limits = rate_limits or RateLimitConfig()
+        self._humanization = humanization or HumanizationConfig()
         self._log = logger.bind(module=__name__)
 
         self._client: BotClient | None = None
@@ -94,6 +104,9 @@ class BotManager:
         self._backlog: BacklogProcessor | None = None
         self._classifier: Classifier | None = None
         self._response_generator: ResponseGenerator | None = None
+        self._rate_limiter: RateLimiter | None = None
+        self._safe_sender: SafeSender | None = None
+        self._spambot_monitor: SpamBotMonitor | None = None
 
         self._state: State = "idle"
         self._active_account_id: int | None = None
@@ -126,6 +139,10 @@ class BotManager:
             "is_connected": self._client.is_connected() if self._client else False,
             "backlog": progress,
             "llm": self._llm.health(),
+            "rate_limiter": (
+                self._rate_limiter.snapshot()
+                if self._rate_limiter is not None else None
+            ),
             **self._response_stats(),
         }
 
@@ -303,14 +320,25 @@ class BotManager:
 
         accounts.set_active_account(self._db_path, account_id)
 
-        # Construct classifier + event handler. Event handler defers live
-        # messages onto an internal queue until bootstrap completes.
+        # Construct classifier, rate limiter, humanizer, and the protected
+        # send path. Event handler defers live messages onto an internal
+        # queue until bootstrap completes.
         self._classifier = Classifier(
             db_path=self._db_path,
             llm=self._llm,
             notifier=self._notifier,
             confidence_threshold=self._confidence_threshold,
             history_window=30,
+        )
+        self._rate_limiter = RateLimiter(
+            self._db_path, account_id, self._rate_limits
+        )
+        humanizer = Humanizer(self._humanization, random.Random())
+        self._spambot_monitor = SpamBotMonitor(
+            db_path=self._db_path,
+            account_id=account_id,
+            rate_limiter=self._rate_limiter,
+            notifier=self._notifier,
         )
         self._event_handler = EventHandler(
             client=client,
@@ -320,17 +348,27 @@ class BotManager:
             classifier=self._classifier,
             resurface_threshold_days=self._resurface_dormant_days,
             operator_user_ids=self._operator_user_ids,
+            rate_limiter=self._rate_limiter,
+            spambot_monitor=self._spambot_monitor,
+        )
+        self._safe_sender = SafeSender(
+            db_path=self._db_path,
+            account_id=account_id,
+            telegram_client=client,
+            rate_limiter=self._rate_limiter,
+            humanizer=humanizer,
+            get_lock=self._event_handler.get_lock,
         )
         self._response_generator = ResponseGenerator(
             db_path=self._db_path,
             llm=self._llm,
-            telegram_client=client,
+            safe_sender=self._safe_sender,
             persona_path=self._response_persona_path,
-            get_lock=self._event_handler.get_lock,
             max_retries=self._response_max_retries,
             temperature=self._response_temperature,
             max_tokens=self._response_max_tokens,
             default_bot_enabled_new_chats=self._default_bot_enabled_new_chats,
+            new_chat_age_days=self._rate_limits.new_chat_age_days,
         )
         self._event_handler.set_response_generator(self._response_generator)
         await self._event_handler.setup()
@@ -433,6 +471,9 @@ class BotManager:
         self._backlog = None
         self._classifier = None
         self._response_generator = None
+        self._rate_limiter = None
+        self._safe_sender = None
+        self._spambot_monitor = None
         self._active_account_id = None
         self._connected_since = None
         self._state = "idle"

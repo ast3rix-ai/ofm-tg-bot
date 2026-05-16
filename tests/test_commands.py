@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from src import commands, storage
+from src.config import RateLimitConfig
+from src.rate_limiter import BreakerState, RateLimiter
 
 
 def _seed_full_chat(db: Path, account_id: int, chat_id: int = 1) -> None:
@@ -83,3 +85,34 @@ async def test_reset_on_unknown_chat_is_noop(db: Path, account_id: int) -> None:
     # No seeding — resetting a chat with no state must not raise.
     await commands.handle_reset(db_path=db, account_id=account_id, chat_id=777)
     assert storage.get_contact_state(db, account_id, 777) is None
+
+
+async def test_breaker_reset_closes_breaker(db: Path, account_id: int) -> None:
+    limiter = RateLimiter(db, account_id, RateLimitConfig())
+    await limiter.record_peer_flood()
+    assert limiter.breaker_state is BreakerState.OPEN
+
+    await commands.handle_breaker_reset(
+        db_path=db, account_id=account_id, rate_limiter=limiter
+    )
+
+    assert limiter.breaker_state is BreakerState.CLOSED
+
+
+async def test_breaker_reset_clears_restriction_and_logs(
+    db: Path, account_id: int
+) -> None:
+    storage.insert_account_restriction(
+        db, account_id=account_id, restriction_type="account_limited",
+        raw_body="limited",
+    )
+    limiter = RateLimiter(db, account_id, RateLimitConfig())
+    assert limiter.breaker_state is BreakerState.OPEN
+
+    await commands.handle_breaker_reset(
+        db_path=db, account_id=account_id, rate_limiter=limiter
+    )
+
+    assert storage.get_active_account_restriction(db, account_id) is None
+    events = storage.get_recent_events(db, account_id=account_id)
+    assert any(e["event_type"] == "operator_breaker_reset" for e in events)

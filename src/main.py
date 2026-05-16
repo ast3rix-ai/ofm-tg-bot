@@ -95,6 +95,8 @@ async def main() -> None:
         response_persona_path=config.response_persona_path,
         operator_user_ids=config.operator_user_ids,
         default_bot_enabled_new_chats=config.default_bot_enabled_new_chats,
+        rate_limits=config.rate_limits,
+        humanization=config.humanization,
     )
 
     app = create_app(config=config, bot_manager=bot_manager, notifier=notifier)

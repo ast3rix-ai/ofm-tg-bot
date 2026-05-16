@@ -12,6 +12,63 @@ class ConfigError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class RateLimitConfig:
+    """Token-bucket, daily-cap, and circuit-breaker tuning.
+
+    All numbers are defaults; the daily caps are env-overridable. The buckets
+    and breaker timings are fixed here and tunable per-persona later.
+    """
+
+    per_chat_refill_per_sec: float = 0.5
+    per_chat_capacity: float = 3.0
+    global_refill_per_sec: float = 1.0
+    global_capacity: float = 10.0
+    daily_per_chat_cap: int = 40
+    daily_global_cap: int = 200
+    new_chat_daily_cap: int = 10
+    new_chat_age_days: int = 7
+    flood_double_window_seconds: float = 300.0
+    flood_open_multiplier: float = 4.0
+    peer_flood_open_seconds: float = 21600.0  # 6 hours
+
+
+@dataclass(frozen=True)
+class HumanizationConfig:
+    """Timing/typo distributions for the humanization layer.
+
+    All randomness in `Humanizer` is drawn through an injected `random.Random`
+    so tests can seed and assert exact output; these are the distribution
+    parameters.
+    """
+
+    chars_per_word: float = 5.0
+    read_words_per_sec: float = 4.2
+    read_jitter_min: float = 1.5
+    read_jitter_max: float = 4.0
+    read_clamp_min: float = 2.0
+    read_clamp_max: float = 15.0
+    typing_cpm_min: float = 200.0
+    typing_cpm_max: float = 400.0
+    typing_jitter_min: float = 0.4
+    typing_jitter_max: float = 1.2
+    typing_clamp_min: float = 1.2
+    typing_clamp_max: float = 8.0
+    inter_quick_prob: float = 0.7
+    inter_quick_min: float = 0.8
+    inter_quick_max: float = 3.0
+    inter_pause_min: float = 3.0
+    inter_pause_max: float = 8.0
+    single_chunk_prob: float = 0.7
+    split_prob: float = 0.6
+    short_sentence_words: int = 5
+    min_chunk_chars: int = 4
+    typo_per_word_prob: float = 0.015
+    typo_correction_prob: float = 0.30
+    correction_delay_min: float = 2.0
+    correction_delay_max: float = 5.0
+
+
+@dataclass(frozen=True)
 class Config:
     """Runtime configuration loaded from environment variables.
 
@@ -47,6 +104,8 @@ class Config:
     response_persona_path: Path
     operator_user_ids: frozenset[int]
     default_bot_enabled_new_chats: int
+    rate_limits: RateLimitConfig
+    humanization: HumanizationConfig
     project_root: Path
     data_dir: Path
     logs_dir: Path
@@ -190,6 +249,13 @@ def load_config(env_file: Path | None = None) -> Config:
 
     default_bot_enabled_new_chats = _opt_int("DEFAULT_BOT_ENABLED_NEW_CHATS", 1)
 
+    rate_limits = RateLimitConfig(
+        daily_per_chat_cap=_opt_int("RATE_LIMIT_DAILY_PER_CHAT", 40),
+        daily_global_cap=_opt_int("RATE_LIMIT_DAILY_GLOBAL", 200),
+        new_chat_daily_cap=_opt_int("RATE_LIMIT_NEW_CHAT_DAILY", 10),
+    )
+    humanization = HumanizationConfig()
+
     if missing or invalid:
         parts: list[str] = []
         if missing:
@@ -231,6 +297,8 @@ def load_config(env_file: Path | None = None) -> Config:
         response_persona_path=persona_path,
         operator_user_ids=frozenset(operator_ids),
         default_bot_enabled_new_chats=default_bot_enabled_new_chats,
+        rate_limits=rate_limits,
+        humanization=humanization,
         project_root=root,
         data_dir=data_dir,
         logs_dir=logs_dir,

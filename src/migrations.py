@@ -454,6 +454,99 @@ CREATE INDEX IF NOT EXISTS idx_response_runs_chat
 """
 
 
+def _apply_migration_006(
+    conn: sqlite3.Connection, _context: MigrationContext
+) -> None:
+    """Phase 5.5: rate-limit counters, circuit breaker, account restrictions.
+
+    Adds the daily-counter, circuit-breaker-event, and account-restriction
+    tables, plus rate-limit/flood columns on `response_runs` and humanizer
+    columns on `bot_sent_messages`. `ADD COLUMN` is guarded by
+    `PRAGMA table_info` so the migration is idempotent.
+    """
+    cur = conn.cursor()
+
+    cur.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS daily_send_counters (
+            account_id  INTEGER NOT NULL REFERENCES accounts(id)
+                            ON DELETE CASCADE,
+            chat_id     INTEGER NOT NULL,
+            utc_day     TEXT NOT NULL,
+            count       INTEGER NOT NULL DEFAULT 0,
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (account_id, chat_id, utc_day)
+        );
+
+        CREATE TABLE IF NOT EXISTS daily_global_counters (
+            account_id  INTEGER NOT NULL REFERENCES accounts(id)
+                            ON DELETE CASCADE,
+            utc_day     TEXT NOT NULL,
+            count       INTEGER NOT NULL DEFAULT 0,
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (account_id, utc_day)
+        );
+
+        CREATE TABLE IF NOT EXISTS circuit_breaker_events (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id        INTEGER NOT NULL REFERENCES accounts(id)
+                                  ON DELETE CASCADE,
+            event             TEXT NOT NULL,
+            reason            TEXT,
+            duration_seconds  REAL,
+            created_at        TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_circuit_breaker_events_account
+            ON circuit_breaker_events (account_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS account_restrictions (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id        INTEGER NOT NULL REFERENCES accounts(id)
+                                  ON DELETE CASCADE,
+            restriction_type  TEXT NOT NULL,
+            raw_body          TEXT,
+            detected_at       TEXT NOT NULL,
+            cleared_at        TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_account_restrictions_active
+            ON account_restrictions (account_id, cleared_at);
+        """
+    )
+
+    cur.execute("PRAGMA table_info(response_runs)")
+    rr_cols = {r[1] for r in cur.fetchall()}
+    if "rate_limit_state" not in rr_cols:
+        cur.execute(
+            "ALTER TABLE response_runs ADD COLUMN rate_limit_state TEXT"
+        )
+    if "flood_wait_seconds" not in rr_cols:
+        cur.execute(
+            "ALTER TABLE response_runs ADD COLUMN flood_wait_seconds INTEGER"
+        )
+    if "circuit_breaker_tripped_at" not in rr_cols:
+        cur.execute(
+            "ALTER TABLE response_runs ADD COLUMN circuit_breaker_tripped_at"
+            " INTEGER"
+        )
+
+    cur.execute("PRAGMA table_info(bot_sent_messages)")
+    bsm_cols = {r[1] for r in cur.fetchall()}
+    if "split_index" not in bsm_cols:
+        cur.execute(
+            "ALTER TABLE bot_sent_messages ADD COLUMN split_index INTEGER"
+            " NOT NULL DEFAULT 0"
+        )
+    if "total_chunks" not in bsm_cols:
+        cur.execute(
+            "ALTER TABLE bot_sent_messages ADD COLUMN total_chunks INTEGER"
+            " NOT NULL DEFAULT 1"
+        )
+    if "humanizer_metadata" not in bsm_cols:
+        cur.execute(
+            "ALTER TABLE bot_sent_messages ADD COLUMN humanizer_metadata TEXT"
+        )
+
+
 MIGRATIONS: list[Migration] = [
     Migration(version=1, name="initial_schema", sql=_MIGRATION_001),
     Migration(version=2, name="contact_state_and_memory", sql=_MIGRATION_002),
@@ -471,6 +564,11 @@ MIGRATIONS: list[Migration] = [
         version=5,
         name="response_runs_and_bot_sent",
         sql=_MIGRATION_005,
+    ),
+    Migration(
+        version=6,
+        name="rate_limit_and_circuit_breaker",
+        apply=_apply_migration_006,
     ),
 ]
 
