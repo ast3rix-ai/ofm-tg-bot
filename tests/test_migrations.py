@@ -74,7 +74,7 @@ def test_phase1_db_is_upgraded(tmp_path: Path, key: str) -> None:
         },
     )
     versions = _applied_versions(db)
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
 
     with sqlite3.connect(str(db)) as conn:
         names = {
@@ -120,10 +120,11 @@ def test_get_applied_migrations_returns_metadata(tmp_path: Path, key: str) -> No
     db = tmp_path / "bot.db"
     storage.init_db(db, migration_context={"encryption_key": key})
     rows = storage.get_applied_migrations(db)
-    assert [r["version"] for r in rows] == [1, 2, 3, 4]
+    assert [r["version"] for r in rows] == [1, 2, 3, 4, 5]
     assert rows[1]["name"] == "contact_state_and_memory"
     assert rows[2]["name"] == "multi_account"
     assert rows[3]["name"] == "classifier_runs_and_alerts"
+    assert rows[4]["name"] == "response_runs_and_bot_sent"
 
 
 def test_migration_004_adds_bot_enabled_and_alerts(
@@ -168,6 +169,55 @@ def test_phase3_db_is_upgraded_to_phase4(tmp_path: Path, key: str) -> None:
         }
     assert "classifier_runs" in tables
     assert "operator_alerts" in tables
+
+
+def test_migration_005_creates_response_tables(tmp_path: Path, key: str) -> None:
+    db = tmp_path / "bot.db"
+    storage.init_db(db, migration_context={"encryption_key": key})
+    with sqlite3.connect(str(db)) as conn:
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "bot_sent_messages" in tables
+        assert "response_runs" in tables
+
+        rr_cols = {r[1] for r in conn.execute("PRAGMA table_info(response_runs)")}
+        assert {
+            "account_id", "chat_id", "triggered_by_message_id", "persona_version",
+            "attempts", "outcome", "gate_reason", "raw_attempts", "final_text",
+            "latency_ms", "created_at",
+        } <= rr_cols
+
+        bsm_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(bot_sent_messages)")
+        }
+        assert {
+            "account_id", "chat_id", "tg_message_id", "response_run_id",
+            "created_at",
+        } <= bsm_cols
+
+
+def test_phase4_db_is_upgraded_to_phase5(tmp_path: Path, key: str) -> None:
+    db = tmp_path / "bot.db"
+    storage.init_db(db, migration_context={"encryption_key": key})
+    # Simulate a "Phase 4 stop point": remove the version-5 row and tables,
+    # then confirm a re-run of init_db restores them idempotently.
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("DELETE FROM schema_migrations WHERE version >= 5")
+        conn.execute("DROP TABLE bot_sent_messages")
+        conn.execute("DROP TABLE response_runs")
+    storage.init_db(db, migration_context={"encryption_key": key})
+    with sqlite3.connect(str(db)) as conn:
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "bot_sent_messages" in tables
+    assert "response_runs" in tables
+    assert _applied_versions(db) == [1, 2, 3, 4, 5]
 
 
 def test_migration_smoke_schema_present(tmp_path: Path, key: str) -> None:

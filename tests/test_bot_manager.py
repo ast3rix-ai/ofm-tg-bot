@@ -78,6 +78,8 @@ async def test_activate_then_deactivate_lifecycle(
 
         evt = AsyncMock()
         evt.setup = AsyncMock()
+        evt.get_lock = MagicMock()
+        evt.set_response_generator = MagicMock()
         EvtCls.return_value = evt
 
         wd = AsyncMock()

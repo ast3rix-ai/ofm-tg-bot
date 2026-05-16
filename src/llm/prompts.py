@@ -207,6 +207,78 @@ Transcript (oldest first):
 JSON:"""
 
 
+# Category-specific instruction overlays for the response generator.
+_CATEGORY_OVERLAY: dict[str, str] = {
+    "cold": "This is a new conversation. Match their energy, keep it light.",
+    "warm": "They're engaged and flirty. Be warm and playful, no sales pressure.",
+    "hot": "They're showing buying interest. Be receptive but don't push.",
+    "negotiating": "You're discussing a specific offer. Be warm and direct.",
+    "post_purchase": "They've bought from you before. Be appreciative and warm.",
+}
+
+
+def _conversation_block(messages: list[dict[str, Any]]) -> str:
+    """Render the rolling window as `you:`/`them:` lines (oldest first)."""
+    lines: list[str] = []
+    for m in messages:
+        direction = m.get("direction") or m.get("dir") or "in"
+        prefix = "you" if direction == "out" else "them"
+        text = (m.get("text") or "").strip()
+        media = m.get("media_type")
+        if not text and media:
+            text = f"[{media}]"
+        if not text:
+            continue
+        lines.append(f"{prefix}: {text}")
+    return "\n".join(lines)
+
+
+def response_prompt(
+    *,
+    persona_text: str,
+    contact_memory: dict[str, Any] | None,
+    recent_messages: list[dict[str, Any]],
+    category: str | None,
+) -> str:
+    """Build the in-persona reply-generation prompt for a single inbound turn."""
+    memory_block = ""
+    if contact_memory:
+        facts = contact_memory.get("facts") or {}
+        summary = (contact_memory.get("summary") or "").strip()
+        parts: list[str] = []
+        if facts:
+            parts.append(
+                "What you know about them: "
+                + json.dumps(facts, ensure_ascii=False, default=str)
+            )
+        if summary:
+            parts.append(f"Conversation so far: {summary}")
+        memory_block = "\n".join(parts)
+
+    overlay = _CATEGORY_OVERLAY.get(
+        (category or "").strip().lower(),
+        "Read the conversation and respond naturally.",
+    )
+
+    window = recent_messages[-20:]
+    conversation = _conversation_block(window) or "(no messages yet)"
+
+    sections = [persona_text.strip(), ""]
+    if memory_block:
+        sections.append(memory_block)
+        sections.append("")
+    sections.append(f"Situation: {overlay}")
+    sections.append("")
+    sections.append("Conversation (oldest first):")
+    sections.append(conversation)
+    sections.append("")
+    sections.append(
+        "Respond in character as Sophia. One reply only. No quotes around it."
+        " No narration. Just what you would text back."
+    )
+    return "\n".join(sections)
+
+
 def summary_update_prompt(
     *, current_summary: str, new_messages: list[dict[str, Any]]
 ) -> str:

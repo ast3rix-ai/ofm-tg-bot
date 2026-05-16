@@ -419,6 +419,41 @@ def _apply_migration_004(
     )
 
 
+_MIGRATION_005 = """
+-- Track which outbound messages the bot sent (vs. operator-sent from phone).
+-- Phase 7 will use this to detect human-takeover via "outbound I didn't send" pattern.
+
+CREATE TABLE IF NOT EXISTS bot_sent_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES accounts(id),
+    chat_id INTEGER NOT NULL,
+    tg_message_id INTEGER NOT NULL,
+    response_run_id INTEGER REFERENCES response_runs(id),
+    created_at TEXT NOT NULL,
+    UNIQUE(account_id, chat_id, tg_message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_bot_sent_chat ON bot_sent_messages(account_id, chat_id);
+
+-- Audit trail for response generation, including re-rolls and refusals.
+CREATE TABLE IF NOT EXISTS response_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES accounts(id),
+    chat_id INTEGER NOT NULL,
+    triggered_by_message_id INTEGER,
+    persona_version TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    gate_reason TEXT,
+    raw_attempts TEXT NOT NULL,
+    final_text TEXT,
+    latency_ms INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_response_runs_chat
+    ON response_runs(account_id, chat_id, created_at DESC);
+"""
+
+
 MIGRATIONS: list[Migration] = [
     Migration(version=1, name="initial_schema", sql=_MIGRATION_001),
     Migration(version=2, name="contact_state_and_memory", sql=_MIGRATION_002),
@@ -431,6 +466,11 @@ MIGRATIONS: list[Migration] = [
         version=4,
         name="classifier_runs_and_alerts",
         apply=_apply_migration_004,
+    ),
+    Migration(
+        version=5,
+        name="response_runs_and_bot_sent",
+        sql=_MIGRATION_005,
     ),
 ]
 

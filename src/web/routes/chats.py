@@ -66,6 +66,12 @@ async def chat_detail(
     runs = storage.get_classifier_runs(
         deps.config.db_path, account_id=account_id, chat_id=chat_id, limit=10
     )
+    response_runs = storage.get_response_runs(
+        deps.config.db_path, account_id=account_id, chat_id=chat_id, limit=10
+    )
+    bot_sent_ids = storage.get_bot_sent_tg_message_ids(
+        deps.config.db_path, account_id, chat_id
+    )
 
     return templates.TemplateResponse(
         request,
@@ -78,6 +84,8 @@ async def chat_detail(
             "state": state,
             "memory": memory,
             "classifier_runs": runs,
+            "response_runs": response_runs,
+            "bot_sent_ids": bot_sent_ids,
             "status": deps.bot_manager.status(),
         },
     )

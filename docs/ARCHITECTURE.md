@@ -30,8 +30,23 @@ Hybrid: rules-first fast path for greeting-only openers on fresh chats (no LLM c
 ### 5b. Backlog processor (`src/backlog.py`)
 Orchestrates two catchup flows the `BotManager` runs on every account activation: (a) **initial bootstrap** — for chats without `bootstrap_completed_at`, pull `max(N messages, last N days)` of history, persist, run `Classifier.bootstrap_chat`; (b) **unread catchup** — for chats with `unread_count > 0`, fetch the unread tail and push through the normal signal-detector + classifier path. Concurrency bounded by per-phase semaphores. Progress visible via `BotManager.status().backlog`.
 
-### 6. Response generator (Phase 5+)
-LLM call. Inputs: persona document, distilled contact memory, rolling message window (~30), category-specific instruction. Output: reply text, possibly multi-part. Output validation rejects AI-tell patterns and triggers re-roll.
+### 6. Response generator (`src/response_generator.py`, Phase 5+)
+Runs after the classifier on every inbound message. Inputs: persona document, distilled contact memory, rolling message window (last 20), category-specific instruction overlay. Output: a single reply text (no multi-part — humanization is Phase 6).
+
+Flow per inbound message:
+
+1. **Gate check (fast path, no LLM call).** Reads `contact_state`. The bot replies only when `bot_enabled = 1` AND `category != 'paid'` AND the `human_active` flag is false. A failing gate records a `response_runs` row with `outcome='gated'` and the `gate_reason` (`bot_disabled` | `category_paid` | `human_active`) and returns. A chat with no `contact_state` row falls back to `DEFAULT_BOT_ENABLED_NEW_CHATS`.
+2. **Prompt build.** The persona file (`RESPONSE_PERSONA_PATH`) is read once, cached, and re-read when its mtime changes — edits land on the next reply without a restart. `response_runs.persona_version` stores the mtime ISO string so audits can correlate.
+3. **Generate loop.** Up to `RESPONSE_MAX_RETRIES + 1` attempts. Each attempt is cleaned (whitespace + wrapping quotes stripped) and run through `output_validator`. The first valid attempt wins; rejected attempts are appended to `raw_attempts`.
+4. **Send.** Acquires the per-chat asyncio lock (shared with the event handler), sends atomically via `telegram_client.send_message`, persists the outbound `messages` row, the `response_runs` row (`outcome='sent'`), and a `bot_sent_messages` row tying the Telegram message id to the run.
+
+Outcomes: `sent`, `gated`, `validator_rejected_all_attempts` (all re-rolls failed — nothing sent), `failed` (LLM or send error). Every call writes exactly one `response_runs` audit row and never raises for ordinary failures.
+
+### 6b. Output validator (`src/output_validator.py`, Phase 5+)
+Deterministic, LLM-free check. Rejects AI-tell regex patterns (`as an AI`, `I cannot`, em-dashes, stage directions, sign-offs, …), replies over 280 chars, double-newline prose, and replies wrapped in quotes. Returns `ValidationResult(valid, reason)`.
+
+### 6c. Operator commands (`src/commands.py`, Phase 5+)
+`/reset` wipes a chat's `contact_state` + `contact_memory` so the next inbound message is treated as a brand-new conversation. The audit trail (`messages`, `classifier_runs`, `response_runs`, `bot_sent_messages`) is preserved. Honoured only from `OPERATOR_USER_IDS`; from anyone else `/reset` is ordinary text. Processed inline in the event handler before classification.
 
 ### 7. Humanization layer (Phase 6+)
 Sits between response generator and Telegram client. Splits long replies into 2-4 messages with inter-message delays. Inserts occasional typos at human rates. Computes typing-indicator duration from reply length. Randomizes total response latency based on time of day and category (cold leads: minutes-to-hours; hot leads: seconds-to-minutes).

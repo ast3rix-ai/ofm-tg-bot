@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from loguru import logger
@@ -120,6 +121,25 @@ class BotClient:
             user_id=getattr(me, "id", None),
             username=getattr(me, "username", None),
         )
+
+    async def send_message(self, chat_id: int, text: str) -> dict[str, Any]:
+        """Send a text message to a chat.
+
+        Atomic — no typing indicator, no delay. The humanization layer
+        (Phase 6) wraps this with timing and message splitting.
+
+        Args:
+            chat_id: Telegram chat id to send to.
+            text: Message body.
+
+        Returns:
+            A dict with `tg_message_id` (int) and `created_at` (ISO UTC).
+        """
+        if self._client is None:
+            raise RuntimeError("BotClient.start() has not been called.")
+        message = await self._client.send_message(chat_id, text)
+        created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        return {"tg_message_id": int(message.id), "created_at": created_at}
 
     async def get_me_summary(self) -> dict[str, Any]:
         """Return a small dict summarizing the authenticated user."""

@@ -2,19 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from loguru import logger
 
-from src import accounts
+from src import accounts, storage
 from src.accounts import AccountsError
 from src.backlog import BacklogProcessor
 from src.classifier import Classifier
 from src.event_handler import EventHandler
 from src.llm.client import LLMClient
 from src.notifier import Notifier
+from src.response_generator import ResponseGenerator
 from src.telegram_client import BotClient, auth_provider_from_queue
 from src.watchdog import Watchdog
 
@@ -56,6 +57,12 @@ class BotManager:
         bootstrap_max_concurrent: int = 3,
         backlog_max_concurrent: int = 5,
         resurface_dormant_days: int = 14,
+        response_temperature: float = 0.85,
+        response_max_tokens: int = 200,
+        response_max_retries: int = 2,
+        response_persona_path: Path | None = None,
+        operator_user_ids: frozenset[int] = frozenset(),
+        default_bot_enabled_new_chats: int = 1,
     ) -> None:
         self._db_path = db_path
         self._encryption_key = encryption_key
@@ -68,6 +75,15 @@ class BotManager:
         self._bootstrap_max_concurrent = bootstrap_max_concurrent
         self._backlog_max_concurrent = backlog_max_concurrent
         self._resurface_dormant_days = resurface_dormant_days
+        self._response_temperature = response_temperature
+        self._response_max_tokens = response_max_tokens
+        self._response_max_retries = response_max_retries
+        self._response_persona_path = (
+            response_persona_path
+            or (db_path.parent.parent / "personas" / "default" / "persona.md")
+        )
+        self._operator_user_ids = operator_user_ids
+        self._default_bot_enabled_new_chats = default_bot_enabled_new_chats
         self._log = logger.bind(module=__name__)
 
         self._client: BotClient | None = None
@@ -77,6 +93,7 @@ class BotManager:
         self._run_task: asyncio.Task[None] | None = None
         self._backlog: BacklogProcessor | None = None
         self._classifier: Classifier | None = None
+        self._response_generator: ResponseGenerator | None = None
 
         self._state: State = "idle"
         self._active_account_id: int | None = None
@@ -109,7 +126,46 @@ class BotManager:
             "is_connected": self._client.is_connected() if self._client else False,
             "backlog": progress,
             "llm": self._llm.health(),
+            **self._response_stats(),
         }
+
+    def _response_stats(self) -> dict[str, Any]:
+        """Response-generator counters for the active account (last hour)."""
+        if self._active_account_id is None:
+            return {
+                "last_response_run_at": None,
+                "responses_sent_last_hour": 0,
+                "responses_gated_last_hour": 0,
+            }
+        account_id = self._active_account_id
+        since = (datetime.now(UTC) - timedelta(hours=1)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f"
+        )[:-3] + "Z"
+        try:
+            return {
+                "last_response_run_at": storage.get_last_response_run_at(
+                    self._db_path, account_id
+                ),
+                "responses_sent_last_hour": storage.count_response_runs_by_outcome(
+                    self._db_path,
+                    account_id=account_id,
+                    outcome="sent",
+                    since_iso=since,
+                ),
+                "responses_gated_last_hour": storage.count_response_runs_by_outcome(
+                    self._db_path,
+                    account_id=account_id,
+                    outcome="gated",
+                    since_iso=since,
+                ),
+            }
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning("Response stats query failed", error=str(exc))
+            return {
+                "last_response_run_at": None,
+                "responses_sent_last_hour": 0,
+                "responses_gated_last_hour": 0,
+            }
 
     @property
     def active_account_id(self) -> int | None:
@@ -263,7 +319,20 @@ class BotManager:
             account_id=account_id,
             classifier=self._classifier,
             resurface_threshold_days=self._resurface_dormant_days,
+            operator_user_ids=self._operator_user_ids,
         )
+        self._response_generator = ResponseGenerator(
+            db_path=self._db_path,
+            llm=self._llm,
+            telegram_client=client,
+            persona_path=self._response_persona_path,
+            get_lock=self._event_handler.get_lock,
+            max_retries=self._response_max_retries,
+            temperature=self._response_temperature,
+            max_tokens=self._response_max_tokens,
+            default_bot_enabled_new_chats=self._default_bot_enabled_new_chats,
+        )
+        self._event_handler.set_response_generator(self._response_generator)
         await self._event_handler.setup()
 
         self._watchdog = Watchdog(
@@ -363,6 +432,7 @@ class BotManager:
         self._run_task = None
         self._backlog = None
         self._classifier = None
+        self._response_generator = None
         self._active_account_id = None
         self._connected_since = None
         self._state = "idle"
