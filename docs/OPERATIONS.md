@@ -106,6 +106,46 @@ The classifier re-runs on every new inbound message, so misclassifications self-
 
 If the bot is mis-replying (Phase 5+), flip `bot_enabled` off and handle the chat by hand.
 
+## How to enable bot replies on a chat
+
+The response generator (Phase 5) only replies when **all three** gates pass:
+
+1. `bot_enabled = 1` on the chat's `contact_state`.
+2. `category` is not `paid`.
+3. The `human_active` flag is false.
+
+Chats seen live from their first message default to `bot_enabled = 1`. **Bootstrapped chats default to `0`** — open `Chats → <contact> → State` and click the `bot: OFF` toggle to greenlight replies. New chats with no state row yet fall back to `DEFAULT_BOT_ENABLED_NEW_CHATS` (`.env`, default `1`).
+
+A blocked reply is not silent — it records a `response_runs` row with `outcome = gated` and a `gate_reason` you can inspect in the UI.
+
+## Using `/reset` to test flows
+
+`/reset` lets you wipe a chat's bot state from inside Telegram so you can rehearse multiple funnel flows in one conversation.
+
+1. Add your own Telegram numeric user id to `OPERATOR_USER_IDS` in `.env` (comma-separated, no spaces). Restart the bot.
+2. From that account, DM the userbot account the literal text `/reset`.
+3. The bot deletes the chat's `contact_state` and `contact_memory`, replies `reset done ✓`, and logs an `operator_reset` event.
+4. The next message you send is classified and answered as a brand-new chat (fresh `bot_enabled = DEFAULT_BOT_ENABLED_NEW_CHATS`).
+
+`/reset` preserves the audit trail — `messages`, `classifier_runs`, `response_runs`, and `bot_sent_messages` rows stay. Only the bot's *understanding* of the chat resets. `/reset` sent by a non-operator account is treated as ordinary text (it gets classified and answered); the command is never acknowledged to non-operators.
+
+## Reviewing response runs in the UI
+
+`/chats/<chat_id>` has a **Response runs** panel showing the last 10 generation attempts:
+
+- **sent** (green) — reply delivered. The sent text and `attempts` count are shown; expand for the raw attempts JSON.
+- **gated** (grey) — a gate blocked the reply. `gate_reason` tells you which one.
+- **validator_rejected_all_attempts** (orange) — every re-roll tripped an AI-tell pattern. Nothing was sent. Expand to see what the model produced.
+- **failed** (red) — the LLM call or the Telegram send raised. Nothing was sent.
+
+Outbound messages the bot sent carry a small **bot** badge in the transcript (vs. messages sent by the operator from the phone). `/system/status` exposes `bot.last_response_run_at`, `bot.responses_sent_last_hour`, and `bot.responses_gated_last_hour`.
+
+## What happens if the LLM produces bad output
+
+If the response model keeps producing AI-tells (`as an AI`, em-dashes, stage directions, refusals), the output validator rejects every re-roll and the run ends as `validator_rejected_all_attempts` — **the bot stays silent rather than send a character-breaking reply**. This is the safe failure mode, but a chat going quiet is still a problem.
+
+If you see `validator_rejected_all_attempts` runs piling up in the UI early in testing, the model is the wrong fit — swap it (set `LLM_MODEL` in `.env`, pull via Ollama, restart) before sinking more time into testing. Favour an abliterated / RP-finetuned model; hosted API providers refuse this content and are not an option. Tune `RESPONSE_TEMPERATURE` and `RESPONSE_MAX_RETRIES` once a workable model is in place.
+
 ## Verifying the watchdog (simulated disconnect)
 
 1. Start the bot.

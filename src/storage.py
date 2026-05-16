@@ -653,3 +653,160 @@ def get_contact_memory(
         except (TypeError, ValueError):
             record["facts"] = {}
     return record
+
+
+def delete_contact_state(db_path: Path, account_id: int, chat_id: int) -> None:
+    """Delete the `contact_state` row for `(account_id, chat_id)` if present."""
+    with _connect(db_path) as conn:
+        conn.execute(
+            "DELETE FROM contact_state WHERE account_id = ? AND chat_id = ?",
+            (account_id, chat_id),
+        )
+
+
+def delete_contact_memory(db_path: Path, account_id: int, chat_id: int) -> None:
+    """Delete the `contact_memory` row for `(account_id, chat_id)` if present."""
+    with _connect(db_path) as conn:
+        conn.execute(
+            "DELETE FROM contact_memory WHERE account_id = ? AND chat_id = ?",
+            (account_id, chat_id),
+        )
+
+
+def get_message_db_id(
+    db_path: Path,
+    *,
+    account_id: int,
+    chat_id: int,
+    tg_message_id: int,
+    direction: Direction,
+) -> int | None:
+    """Return the `messages.id` primary key for a Telegram message, or None."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM messages"
+            " WHERE account_id = ? AND chat_id = ? AND tg_message_id = ?"
+            " AND direction = ?",
+            (account_id, chat_id, tg_message_id, direction),
+        ).fetchone()
+    return None if row is None else int(row[0])
+
+
+def insert_response_run(
+    db_path: Path,
+    *,
+    account_id: int,
+    chat_id: int,
+    triggered_by_message_id: int | None,
+    persona_version: str,
+    attempts: int,
+    outcome: str,
+    gate_reason: str | None,
+    raw_attempts: list[Any],
+    final_text: str | None,
+    latency_ms: int,
+) -> int:
+    """Insert a `response_runs` audit row. Returns the new row id."""
+    now = _utcnow_iso()
+    raw_json = json.dumps(raw_attempts, default=str, ensure_ascii=False)
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO response_runs (
+                account_id, chat_id, triggered_by_message_id, persona_version,
+                attempts, outcome, gate_reason, raw_attempts, final_text,
+                latency_ms, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account_id, chat_id, triggered_by_message_id, persona_version,
+                attempts, outcome, gate_reason, raw_json, final_text,
+                latency_ms, now,
+            ),
+        )
+    return int(cur.lastrowid or 0)
+
+
+def insert_bot_sent_message(
+    db_path: Path,
+    *,
+    account_id: int,
+    chat_id: int,
+    tg_message_id: int,
+    response_run_id: int | None,
+) -> None:
+    """Tag an outbound message as bot-sent. Idempotent on the unique key."""
+    now = _utcnow_iso()
+    with _connect(db_path) as conn:
+        try:
+            conn.execute(
+                """
+                INSERT INTO bot_sent_messages (
+                    account_id, chat_id, tg_message_id, response_run_id, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (account_id, chat_id, tg_message_id, response_run_id, now),
+            )
+        except sqlite3.IntegrityError:
+            pass
+
+
+def get_response_runs(
+    db_path: Path, *, account_id: int, chat_id: int, limit: int = 10
+) -> list[dict[str, Any]]:
+    """Return the `limit` most recent `response_runs` rows, newest first."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM response_runs"
+            " WHERE account_id = ? AND chat_id = ?"
+            " ORDER BY id DESC LIMIT ?",
+            (account_id, chat_id, limit),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        raw = d.get("raw_attempts")
+        if isinstance(raw, str):
+            try:
+                d["raw_attempts"] = json.loads(raw)
+            except (TypeError, ValueError):
+                d["raw_attempts"] = []
+        out.append(d)
+    return out
+
+
+def get_bot_sent_tg_message_ids(
+    db_path: Path, account_id: int, chat_id: int
+) -> set[int]:
+    """Return the set of `tg_message_id`s the bot sent in this chat."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT tg_message_id FROM bot_sent_messages"
+            " WHERE account_id = ? AND chat_id = ?",
+            (account_id, chat_id),
+        ).fetchall()
+    return {int(r[0]) for r in rows}
+
+
+def get_last_response_run_at(db_path: Path, account_id: int) -> str | None:
+    """Return the `created_at` of the most recent response run, or None."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT created_at FROM response_runs"
+            " WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+            (account_id,),
+        ).fetchone()
+    return None if row is None else str(row[0])
+
+
+def count_response_runs_by_outcome(
+    db_path: Path, *, account_id: int, outcome: str, since_iso: str
+) -> int:
+    """Count response runs with `outcome`, created at or after `since_iso`."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM response_runs"
+            " WHERE account_id = ? AND outcome = ? AND created_at >= ?",
+            (account_id, outcome, since_iso),
+        ).fetchone()
+    return int(row[0])

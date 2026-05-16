@@ -41,6 +41,12 @@ class Config:
     bootstrap_max_concurrent: int
     backlog_max_concurrent: int
     resurface_dormant_days: int
+    response_temperature: float
+    response_max_tokens: int
+    response_max_retries: int
+    response_persona_path: Path
+    operator_user_ids: frozenset[int]
+    default_bot_enabled_new_chats: int
     project_root: Path
     data_dir: Path
     logs_dir: Path
@@ -159,6 +165,31 @@ def load_config(env_file: Path | None = None) -> Config:
     backlog_max_concurrent = _opt_int("BACKLOG_MAX_CONCURRENT", 5)
     resurface_dormant_days = _opt_int("RESURFACE_DORMANT_DAYS", 14)
 
+    response_temperature = _opt_float("RESPONSE_TEMPERATURE", 0.85)
+    response_max_tokens = _opt_int("RESPONSE_MAX_TOKENS", 200)
+    response_max_retries = _opt_int("RESPONSE_MAX_RETRIES", 2)
+    persona_path_raw = (
+        os.environ.get("RESPONSE_PERSONA_PATH", "").strip()
+        or "personas/default/persona.md"
+    )
+    persona_path = Path(persona_path_raw)
+    if not persona_path.is_absolute():
+        persona_path = root / persona_path
+
+    operator_ids: set[int] = set()
+    operator_raw = os.environ.get("OPERATOR_USER_IDS", "").strip()
+    if operator_raw:
+        for raw_part in operator_raw.split(","):
+            part = raw_part.strip()
+            if not part:
+                continue
+            try:
+                operator_ids.add(int(part))
+            except ValueError:
+                invalid.append(f"OPERATOR_USER_IDS (not an integer: {part!r})")
+
+    default_bot_enabled_new_chats = _opt_int("DEFAULT_BOT_ENABLED_NEW_CHATS", 1)
+
     if missing or invalid:
         parts: list[str] = []
         if missing:
@@ -194,6 +225,12 @@ def load_config(env_file: Path | None = None) -> Config:
         bootstrap_max_concurrent=bootstrap_max_concurrent,
         backlog_max_concurrent=backlog_max_concurrent,
         resurface_dormant_days=resurface_dormant_days,
+        response_temperature=response_temperature,
+        response_max_tokens=response_max_tokens,
+        response_max_retries=response_max_retries,
+        response_persona_path=persona_path,
+        operator_user_ids=frozenset(operator_ids),
+        default_bot_enabled_new_chats=default_bot_enabled_new_chats,
         project_root=root,
         data_dir=data_dir,
         logs_dir=logs_dir,

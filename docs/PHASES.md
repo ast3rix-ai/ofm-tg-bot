@@ -31,14 +31,14 @@ Each phase is independently shippable. Do not implement features from future pha
 **Out of scope:** outbound messaging.
 **Note:** Phase 5 must read `bot_enabled` before generating any reply; the toggle is operator-controlled and defaults off for bootstrapped chats.
 
-## Phase 5 — Response generator
-**Status:** not started
-**Scope:** LLM-driven reply generation. Persona document loaded from disk. Rolling window + distilled memory + summary feeding the prompt. Output validation with AI-tell blacklist and re-roll. Sends replies via Telegram client. Per-chat lock enforcement.
-**Out of scope:** humanization (sends are immediate and atomic in this phase — humanization is Phase 6).
+## Phase 5 — Response generator (MVP slice)
+**Status:** complete
+**Scope:** LLM-driven reply generation. Minimal hardcoded persona (`personas/default/persona.md`) loaded from disk with mtime-based hot-reload. Rolling window + distilled memory feeding the prompt. Output validation with AI-tell blacklist and re-roll. Atomic sends via Telegram client under a per-chat lock. Reply gating on `bot_enabled` / `category != 'paid'` / `human_active`. Operator `/reset` command. Outbound message tagging (`bot_sent_messages`) as Phase 7 groundwork. Migration 005 adds `response_runs` + `bot_sent_messages`.
+**Out of scope:** humanization (sends are immediate and atomic in this phase — humanization is Phase 6); real persona depth (Phase 8); operator-takeover auto-detection and routing rules (Phase 7).
 
 ## Phase 6 — Humanization layer
 **Status:** not started
-**Scope:** Message splitting, inter-message delays, typing indicators, response latency distributions by category and time of day, occasional realistic typos, read-receipt patterns.
+**Scope:** Message splitting, inter-message delays, typing indicators, response latency distributions by category and time of day, occasional realistic typos, read-receipt patterns. Wraps the Phase 5 atomic `telegram_client.send_message`.
 
 ## Phase 7 — Routing rules + handoff + control chat
 **Status:** not started

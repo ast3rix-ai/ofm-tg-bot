@@ -89,6 +89,12 @@ async def main() -> None:
         bootstrap_max_concurrent=config.bootstrap_max_concurrent,
         backlog_max_concurrent=config.backlog_max_concurrent,
         resurface_dormant_days=config.resurface_dormant_days,
+        response_temperature=config.response_temperature,
+        response_max_tokens=config.response_max_tokens,
+        response_max_retries=config.response_max_retries,
+        response_persona_path=config.response_persona_path,
+        operator_user_ids=config.operator_user_ids,
+        default_bot_enabled_new_chats=config.default_bot_enabled_new_chats,
     )
 
     app = create_app(config=config, bot_manager=bot_manager, notifier=notifier)

@@ -10,13 +10,14 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 from telethon import events
 
-from src import storage
+from src import commands, storage
 from src.notifier import Notifier
 from src.signal_detector import run_signals
 from src.telegram_client import BotClient
 
 if TYPE_CHECKING:
     from src.classifier import Classifier
+    from src.response_generator import ResponseGenerator
 
 _TEXT_PREVIEW_CHARS = 80
 
@@ -57,6 +58,7 @@ class EventHandler:
         account_id: int,
         classifier: Classifier | None = None,
         resurface_threshold_days: int = 14,
+        operator_user_ids: frozenset[int] = frozenset(),
     ) -> None:
         self._client = client
         self._db_path = db_path
@@ -64,6 +66,8 @@ class EventHandler:
         self._account_id = account_id
         self._classifier = classifier
         self._resurface_days = resurface_threshold_days
+        self._operator_user_ids = operator_user_ids
+        self._response_generator: ResponseGenerator | None = None
         self._log = logger.bind(module=__name__, account_id=account_id)
         self._chat_locks: dict[int, asyncio.Lock] = {}
         self._pending: list[dict[str, Any]] = []
@@ -75,6 +79,12 @@ class EventHandler:
             lock = asyncio.Lock()
             self._chat_locks[chat_id] = lock
         return lock
+
+    def set_response_generator(
+        self, response_generator: ResponseGenerator
+    ) -> None:
+        """Attach the response generator. Called by `BotManager` post-construction."""
+        self._response_generator = response_generator
 
     async def setup(self) -> None:
         tg = self._client.client
@@ -159,7 +169,22 @@ class EventHandler:
                 duplicate=not inserted,
             )
 
-            if not inserted or self._classifier is None:
+            if not inserted:
+                return
+
+            # Operator `/reset` command — runs before classification. Only
+            # honoured from allow-listed operator accounts; from anyone else
+            # `/reset` is treated as ordinary text (we do not leak its
+            # existence).
+            if (
+                text is not None
+                and text.strip().lower().startswith("/reset")
+                and sender_id in self._operator_user_ids
+            ):
+                await self._handle_reset(chat_id)
+                return
+
+            if self._classifier is None:
                 return
 
             payload = {
@@ -202,6 +227,44 @@ class EventHandler:
                 key="event_handler_failure",
             )
 
+    async def _handle_reset(self, chat_id: int) -> None:
+        """Wipe a chat's state on operator command and confirm in-chat."""
+        await commands.handle_reset(
+            db_path=self._db_path,
+            account_id=self._account_id,
+            chat_id=chat_id,
+        )
+        confirmation = "reset done ✓"
+        try:
+            async with self.get_lock(chat_id):
+                sent = await self._client.send_message(chat_id, confirmation)
+                tg_message_id = int(sent["tg_message_id"])
+                storage.insert_message(
+                    self._db_path,
+                    account_id=self._account_id,
+                    chat_id=chat_id,
+                    tg_message_id=tg_message_id,
+                    direction="out",
+                    sender_id=0,
+                    text=confirmation,
+                    media_type=None,
+                    raw_json='{"operator_command": "reset"}',
+                )
+                storage.insert_bot_sent_message(
+                    self._db_path,
+                    account_id=self._account_id,
+                    chat_id=chat_id,
+                    tg_message_id=tg_message_id,
+                    response_run_id=None,
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(
+                "Reset confirmation send failed",
+                chat_id=chat_id,
+                error=str(exc),
+            )
+        self._log.info("Operator /reset handled", chat_id=chat_id)
+
     async def _classify_persisted(self, payload: dict[str, Any]) -> None:
         assert self._classifier is not None
         chat_id = int(payload["chat_id"])
@@ -238,3 +301,43 @@ class EventHandler:
                 chat_id=chat_id,
                 error=str(exc),
             )
+
+        # Dispatch the response generator. Failures here must never break
+        # the event handler — they are caught, logged, and alerted.
+        if self._response_generator is not None:
+            try:
+                triggering_id = storage.get_message_db_id(
+                    self._db_path,
+                    account_id=self._account_id,
+                    chat_id=chat_id,
+                    tg_message_id=int(payload["tg_message_id"]),
+                    direction="in",
+                )
+                await self._response_generator.generate(
+                    account_id=self._account_id,
+                    chat_id=chat_id,
+                    triggering_message_id=triggering_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                tb = traceback.format_exc()
+                self._log.error(
+                    "Response generation failed",
+                    chat_id=chat_id,
+                    error=str(exc),
+                    traceback=tb,
+                )
+                try:
+                    storage.insert_operator_alert(
+                        self._db_path,
+                        account_id=self._account_id,
+                        chat_id=chat_id,
+                        alert_type="response_generation_error",
+                        severity="error",
+                        message=f"Response generation failed: {exc}",
+                        payload={"traceback": tb},
+                    )
+                except Exception as alert_exc:  # noqa: BLE001
+                    self._log.warning(
+                        "Failed to persist response error alert",
+                        error=str(alert_exc),
+                    )
